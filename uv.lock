@@ -164,6 +164,8 @@ source = { editable = "." }
 dependencies = [
     { name = "rich" },
     { name = "textual" },
+    { name = "tree-sitter" },
+    { name = "tree-sitter-diff" },
     { name = "unidiff" },
 ]
 
@@ -178,6 +180,8 @@ dev = [
 requires-dist = [
     { name = "rich", specifier = ">=15.0.0" },
     { name = "textual", specifier = ">=8.2.8" },
+    { name = "tree-sitter", specifier = ">=0.25.0" },
+    { name = "tree-sitter-diff", git = "https://github.com/tree-sitter-grammars/tree-sitter-diff.git?rev=v0.2.0" },
     { name = "unidiff", specifier = ">=1.0.1" },
 ]
 
@@ -204,6 +208,17 @@ sdist = { url = "https://files.pythonhosted.org/packages/00/21/39a76b01bd5eea82a
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fb/be/35261223d9416a0751cdff1c7b4a6f881387218a12d439fe22fefebc8c04/textual-8.2.8-py3-none-any.whl", hash = "sha256:267375fd402dc8d981457212efa71f0e3365fd17bba144ba9bb3ed7563cb374a", size = 731418, upload-time = "2026-06-30T06:51:26.364Z" },
 ]
+
+[[package]]
+name = "tree-sitter"
+version = "0.26.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e6/ca/3d69b21b2328dadee34a6cae65bc84e2b4e0c72bfb9147b7a2d4ba8110a0/tree_sitter-0.26.1.tar.gz", hash = "sha256:9919cbaf02d17fa9a4cd0e6da496aecf901b758e6eacf122eee393e3ef08aacd", size = 194642, upload-time = "2026-11-09T15:18:09.448Z" }
+
+[[package]]
+name = "tree-sitter-diff"
+version = "0.2.0"
+source = { git = "https://github.com/tree-sitter-grammars/tree-sitter-diff.git?rev=v0.2.0#ada384ac7bfc1307f32de474620120add29998fb" }
 
 [[package]]
 name = "ty"

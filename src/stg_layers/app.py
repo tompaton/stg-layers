@@ -1,16 +1,32 @@
 import asyncio
 from typing import Protocol
 
+from rich.style import Style
 from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Header, Static, Tree
+from textual.widgets import Footer, Header, Static, TextArea, Tree
 from textual.widgets._tree import TreeNode
+from textual.widgets.text_area import TextAreaTheme
+from tree_sitter import Language
+from tree_sitter_diff import HIGHLIGHTS_QUERY
+from tree_sitter_diff import language as diff_language
 
 from stg_layers.models import FileChange, FileStatus, Patch, TreeItem
 from stg_layers.repository import RepositoryError
+
+_DIFF_THEME = TextAreaTheme(
+    name="stg-diff",
+    syntax_styles={
+        "diff.plus": Style(color="#98c379"),
+        "diff.minus": Style(color="#e06c75"),
+        "diff.delta": Style(color="#e5c07b", bold=True),
+        "label": Style(color="#61afef"),
+        "attribute": Style(color="#c678dd"),
+    },
+)
 
 
 class StackReader(Protocol):
@@ -49,7 +65,6 @@ class StgLayersApp(App[None]):
 
     #diff-view {
         height: 1fr;
-        overflow: auto;
     }
 
     #status {
@@ -76,7 +91,26 @@ class StgLayersApp(App[None]):
                 yield tree
             with Vertical(id="preview-pane"):
                 yield Static("Select a patch, file, or hunk.", id="selection-title", markup=False)
-                yield Static("", id="diff-view", markup=False)
+                preview = TextArea(
+                    "",
+                    read_only=True,
+                    show_cursor=False,
+                    show_line_numbers=True,
+                    soft_wrap=False,
+                    compact=True,
+                    id="diff-view",
+                )
+                if HIGHLIGHTS_QUERY is None:
+                    raise RuntimeError("The Tree-sitter diff grammar has no highlight query.")
+                preview.register_language(
+                    "diff",
+                    Language(diff_language()),
+                    HIGHLIGHTS_QUERY,
+                )
+                preview.register_theme(_DIFF_THEME)
+                preview.language = "diff"
+                preview.theme = _DIFF_THEME.name
+                yield preview
         yield Static("Loading StGit stack...", id="status", markup=False)
         yield Footer()
 
@@ -92,7 +126,8 @@ class StgLayersApp(App[None]):
         if item is None:
             return
         self.query_one("#selection-title", Static).update(item.title)
-        self.query_one("#diff-view", Static).update(item.diff_text or "No text diff available.")
+        preview = self.query_one("#diff-view", TextArea)
+        preview.load_text(item.diff_text or "No text diff available.")
 
     async def _load_stack(self) -> None:
         status = self.query_one("#status", Static)

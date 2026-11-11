@@ -48,7 +48,7 @@ The first milestone is a read-only browser for the patch stack and current index
 - Display a Textual tree with top-level `Patch stack`, `Staged changes`, and `Unstaged changes` groups, in that order. Under the patch stack show patch > file > hunk; under staged and unstaged show file > hunk.
 - Read staged changes with `git diff --cached --patch`. Read unstaged tracked changes with `git diff --patch` and include non-ignored untracked files as additions; parse all diffs with the same library as StGit patch diffs.
 - Show explicit empty states for an empty patch stack and for no staged or unstaged changes.
-- Display a diff preview for the selected patch, staged/unstaged group, file, or hunk.
+- Display the selected patch, staged/unstaged group, file, or hunk diff in a read-only, focusable TextArea with scrolling, line numbers, and Tree-sitter highlighting for additions, removals, and hunk headers.
 - Provide keyboard navigation, expand/collapse, refresh, and useful empty/error states.
 - Do not change the index, working tree, or patch stack in the browser milestone.
 
@@ -65,7 +65,7 @@ Keep the first implementation to four responsibilities:
 1. **CLI entry point and app** — start Textual from a `uv tool`-installable console command, resolve the repository working directory, and compose the screen.
 2. **StGit adapter** — run `stg` and `git` with argument arrays (never a shell), capture exit status and stderr, and expose typed operations for stack, file, and diff reads.
 3. **Diff model** — use `unidiff` (or another validated library) to convert StGit patch diffs and staged/unstaged Git diffs into typed `Patch`, `FileChange`, and `Hunk` records. Keep source/category, patch identity, paths, source diff, and library hunk/line data so the model can support later mutations. Do not write a second unified-diff parser.
-4. **Textual widgets** — render the tree and selected diff. Keep widgets independent of subprocess execution and parsing.
+4. **Textual widgets** — render the tree and selected diff. Use a read-only TextArea for the preview so it can receive keyboard focus, scroll independently, and highlight unified-diff syntax with Tree-sitter. Keep widgets independent of subprocess execution and parsing.
 
 Use the StGit CLI as the source of truth for stack membership and patch state. Obtain patch diffs from `stg show` or Git against the patch commits, whichever proves simplest and most reliable for applied and unapplied patches. Obtain index changes from `git diff --cached --patch` and worktree changes from `git diff --patch`, and include non-ignored untracked files in the unstaged group as additions. Keep these categories separate and do not merge or count changes twice. Disable external diff drivers and text conversion for predictable, read-only output. Prefer documented structured output or explicit formatting options when available. Delegate diff syntax handling to the chosen library; add only the application-specific mapping and guards needed for quoted paths, renames, binary files, and unsupported diff sections.
 
@@ -80,7 +80,9 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 - Use `ty check` for static type checking.
 - Use Ruff for formatting and linting; enable McCabe complexity diagnostics (`C901`) with a defined maximum complexity.
 - Use a maintained unified-diff library (initial candidate: `unidiff`) rather than implementing patch parsing; verify its API, edge-case behavior, and Python 3.15 compatibility before adding/pinning it.
-- Keep the tool's runtime requirements limited to Python and the external `stg`/`git` executables.
+- Use Textual's TextArea and a Tree-sitter grammar for unified diffs; pin the grammar to a tagged upstream release and verify installation and rendering on Python 3.15.
+- Keep runtime dependencies within Python packages plus the external `stg`/`git` executables; do not require additional services or Git extensions.
+- `tree-sitter-diff` is currently sourced from its tagged GitHub release because it is not published on PyPI. `uv tool install .` from a checkout is verified; revisit the grammar distribution source before publishing this application to PyPI.
 - Verify that Textual and the packaging/build dependencies support Python 3.15 before fixing dependency versions.
 
 ## Development plan
@@ -111,6 +113,7 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 ### 4. Build the tree browser
 
 - Render top-level Patch stack, Staged changes, and Unstaged changes groups in that order, with patch > file > hunk and file > hunk trees respectively, plus an adjacent diff preview.
+- Use a read-only TextArea for the diff preview, with Tree-sitter highlighting and line numbers. Support Tab focus between the tree and preview, and scroll the preview with keyboard or mouse.
 - Add keyboard navigation, expand/collapse, and refresh.
 - Manually verify behavior for empty patches, empty staged/unstaged changes, unapplied patches, file renames, binary files, and command errors.
 

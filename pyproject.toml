@@ -7,6 +7,8 @@ requires-python = ">=3.15"
 dependencies = [
     "rich>=15.0.0",
     "textual>=8.2.8",
+    "tree-sitter>=0.25.0",
+    "tree-sitter-diff",
     "unidiff>=1.0.1",
 ]
 
@@ -36,3 +38,6 @@ select = ["B", "C901", "E", "F", "I"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 8
+
+[tool.uv.sources]
+tree-sitter-diff = { git = "https://github.com/tree-sitter-grammars/tree-sitter-diff.git", rev = "v0.2.0" }

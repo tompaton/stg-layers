@@ -1,6 +1,6 @@
 import asyncio
 
-from textual.widgets import Static, Tree
+from textual.widgets import Static, TextArea, Tree
 
 from stg_layers.app import StgLayersApp
 from stg_layers.models import DiffHunk, FileChange, FileStatus, Patch, PatchStatus
@@ -93,9 +93,39 @@ def test_app_renders_patch_file_hunk_tree() -> None:
             tree.select_node(hunk_node)
             await pilot.pause()
             title = app.query_one("#selection-title", Static).render()
-            diff = app.query_one("#diff-view", Static).render()
+            diff = app.query_one("#diff-view", TextArea)
             assert "hunk 1" in str(title)
-            assert "+after" in str(diff)
+            assert "+after" in diff.text
+            assert diff.read_only
+            assert diff.language == "diff"
+            assert diff.theme == "stg-diff"
+            assert any(name == "attribute" for _, _, name in diff._highlights[0])
+            assert any(name == "diff.minus" for _, _, name in diff._highlights[1])
+            assert any(name == "diff.plus" for _, _, name in diff._highlights[2])
+
+    asyncio.run(run_app())
+
+
+def test_diff_preview_can_focus_and_scroll_without_editing() -> None:
+    async def run_app() -> None:
+        app = StgLayersApp(FixtureRepository())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            preview = app.query_one("#diff-view", TextArea)
+            original_text = "\n".join(f"+added line {index}" for index in range(100))
+            preview.load_text(original_text)
+            tree.focus()
+            await pilot.press("tab")
+            await pilot.pause()
+
+            assert preview.has_focus
+            assert preview.read_only
+            await pilot.press("pagedown")
+            await pilot.pause()
+            assert preview.scroll_y > 0
+            await pilot.press("a")
+            assert preview.text == original_text
 
     asyncio.run(run_app())
 
