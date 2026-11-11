@@ -156,7 +156,12 @@ class StGitRepository:
         repository.branch = branch or None
         return repository
 
-    def _run(self, executable: str, *args: str) -> str:
+    def _run(
+        self,
+        executable: str,
+        *args: str,
+        allowed_returncodes: tuple[int, ...] = (),
+    ) -> str:
         command = (executable, *args)
         try:
             result = subprocess.run(
@@ -172,7 +177,7 @@ class StGitRepository:
             raise RepositoryError(f"{executable} was not found on PATH.") from error
         except OSError as error:
             raise RepositoryError(f"Could not run {executable}: {error}") from error
-        if result.returncode:
+        if result.returncode and result.returncode not in allowed_returncodes:
             detail = result.stderr.strip() or result.stdout.strip()
             raise CommandError(command, result.returncode, detail)
         return result.stdout
@@ -201,3 +206,48 @@ class StGitRepository:
                 )
             )
         return tuple(patches)
+
+    def load_staged_changes(self) -> tuple[FileChange, ...]:
+        diff = self._run(
+            "git",
+            "diff",
+            "--cached",
+            "--patch",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+        )
+        return _parse_diff("staged changes", diff)
+
+    def load_unstaged_changes(self) -> tuple[FileChange, ...]:
+        diff = self._run(
+            "git",
+            "diff",
+            "--patch",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+        )
+        files = list(_parse_diff("unstaged changes", diff))
+        untracked_paths = self._run(
+            "git", "ls-files", "--others", "--exclude-standard", "-z"
+        ).split("\0")
+        for path in sorted(path for path in untracked_paths if path):
+            untracked_diff = self._run(
+                "git",
+                "--literal-pathspecs",
+                "diff",
+                "--no-index",
+                "--patch",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--",
+                "/dev/null",
+                path,
+                allowed_returncodes=(1,),
+            )
+            if not untracked_diff:
+                raise RepositoryError(f"Git returned no diff for untracked file {path!r}.")
+            files.extend(_parse_diff(f"untracked file {path!r}", untracked_diff))
+        return tuple(files)

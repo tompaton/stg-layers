@@ -240,6 +240,37 @@ def test_load_stack_reads_applied_and_unapplied_patches(tmp_path: Path) -> None:
     shutil.which("git") is None or shutil.which("stg") is None,
     reason="Git and StGit are required for integration tests",
 )
+def test_load_staged_and_unstaged_changes_separately(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_two_patch_stack(tmp_path, environment)
+
+    base_file = tmp_path / "base.txt"
+    base_file.write_text("base\nfirst layer\nstaged addition\n", encoding="utf-8")
+    _run(tmp_path, environment, "git", "add", "--", "base.txt")
+    base_file.write_text(
+        "base\nfirst layer\nstaged addition\nunstaged addition\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "new file.txt").write_text("untracked content\n", encoding="utf-8")
+
+    repository = StGitRepository.discover(tmp_path)
+    staged = repository.load_staged_changes()
+    unstaged = repository.load_unstaged_changes()
+
+    assert [file.path for file in staged] == ["base.txt"]
+    assert [file.path for file in unstaged] == ["base.txt", "new file.txt"]
+    assert "+staged addition" in staged[0].diff_text
+    assert "+unstaged addition" not in staged[0].diff_text
+    assert "+unstaged addition" in unstaged[0].diff_text
+    assert "+staged addition" not in unstaged[0].diff_text
+    assert unstaged[1].status == FileStatus.ADDED
+    assert "+untracked content" in unstaged[1].diff_text
+
+
+@pytest.mark.skipif(
+    shutil.which("git") is None or shutil.which("stg") is None,
+    reason="Git and StGit are required for integration tests",
+)
 def test_staged_worktree_hunk_can_refresh_an_earlier_patch(tmp_path: Path) -> None:
     environment = _git_environment()
     _create_two_patch_stack(tmp_path, environment)

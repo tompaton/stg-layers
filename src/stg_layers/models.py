@@ -57,3 +57,4 @@ class TreeItem:
     patch_name: str | None = None
     file_path: str | None = None
     hunk_index: int | None = None
+    change_area: str | None = None

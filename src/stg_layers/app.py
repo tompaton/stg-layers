@@ -7,8 +7,9 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Static, Tree
+from textual.widgets._tree import TreeNode
 
-from stg_layers.models import FileStatus, Patch, TreeItem
+from stg_layers.models import FileChange, FileStatus, Patch, TreeItem
 from stg_layers.repository import RepositoryError
 
 
@@ -16,6 +17,10 @@ class StackReader(Protocol):
     branch: str | None
 
     def load_stack(self) -> tuple[Patch, ...]: ...
+
+    def load_staged_changes(self) -> tuple[FileChange, ...]: ...
+
+    def load_unstaged_changes(self) -> tuple[FileChange, ...]: ...
 
 
 class StgLayersApp(App[None]):
@@ -66,7 +71,7 @@ class StgLayersApp(App[None]):
         yield Header()
         with Horizontal(id="main"):
             with Vertical(id="tree-pane"):
-                tree: Tree[TreeItem] = Tree("Patch stack", id="patch-tree")
+                tree: Tree[TreeItem] = Tree("Repository", id="patch-tree")
                 tree.root.expand()
                 yield tree
             with Vertical(id="preview-pane"):
@@ -91,13 +96,17 @@ class StgLayersApp(App[None]):
 
     async def _load_stack(self) -> None:
         status = self.query_one("#status", Static)
-        status.update("Loading StGit stack...")
+        status.update("Loading patch stack and working changes...")
         try:
-            patches = await asyncio.to_thread(self.repository.load_stack)
+            patches, staged, unstaged = await asyncio.gather(
+                asyncio.to_thread(self.repository.load_stack),
+                asyncio.to_thread(self.repository.load_staged_changes),
+                asyncio.to_thread(self.repository.load_unstaged_changes),
+            )
         except RepositoryError as error:
             self._show_error(error)
             return
-        self._populate_tree(patches)
+        self._populate_tree(patches, staged, unstaged)
         count = len(patches)
         status.update(f"Loaded {count} patch{'es' if count != 1 else ''}. Press r to refresh.")
 
@@ -107,23 +116,55 @@ class StgLayersApp(App[None]):
         tree.root.add("Unable to load StGit stack", allow_expand=False)
         self.query_one("#status", Static).update(f"Error: {error}")
 
-    def _populate_tree(self, patches: tuple[Patch, ...]) -> None:
+    def _populate_tree(
+        self,
+        patches: tuple[Patch, ...],
+        staged: tuple[FileChange, ...],
+        unstaged: tuple[FileChange, ...],
+    ) -> None:
         tree = self.query_one("#patch-tree", Tree)
         tree.root.remove_children()
+        patch_stack = tree.root.add(
+            Text("Patch stack"),
+            data=TreeItem(title="Patch stack", diff_text=""),
+            expand=True,
+        )
         if not patches:
-            tree.root.add("No patches in this stack.", allow_expand=False)
-            return
+            patch_stack.add("No patches in this stack.", allow_expand=False)
+        else:
+            for patch in patches:
+                self._add_patch(patch_stack, patch)
 
-        for patch in patches:
-            self._add_patch(tree, patch)
+        self._add_change_group(tree.root, "Staged changes", "staged", staged)
+        self._add_change_group(tree.root, "Unstaged changes", "unstaged", unstaged)
 
     @staticmethod
-    def _add_patch(tree: Tree[TreeItem], patch: Patch) -> None:
+    def _add_change_group(
+        parent: TreeNode[TreeItem],
+        label: str,
+        change_area: str,
+        files: tuple[FileChange, ...],
+    ) -> None:
+        group = parent.add(
+            Text(label),
+            data=TreeItem(title=label, diff_text="", change_area=change_area),
+            expand=True,
+            allow_expand=True,
+        )
+        if not files:
+            group.add(f"No {change_area} changes.", allow_expand=False)
+            return
+
+        for file in files:
+            StgLayersApp._add_file(group, file, None, change_area)
+
+    @staticmethod
+    def _add_patch(parent: TreeNode[TreeItem], patch: Patch) -> None:
         status = f"[{patch.status.value}]"
         label = f"{status} {patch.name}"
         if patch.description:
             label = f"{label} - {patch.description}"
-        patch_node = tree.root.add(
+        patch_node = parent.add(
             Text(label),
             data=TreeItem(
                 title=f"Patch: {patch.name}",
@@ -137,29 +178,46 @@ class StgLayersApp(App[None]):
             return
 
         for file in patch.files:
-            display_path = file.path
-            if file.status == FileStatus.RENAMED:
-                display_path = f"{file.source_path} -> {file.target_path}"
-            file_node = patch_node.add(
-                Text(f"{display_path} [{file.status.value}]"),
+            StgLayersApp._add_file(patch_node, file, patch.name, None)
+
+    @staticmethod
+    def _add_file(
+        parent: TreeNode[TreeItem],
+        file: FileChange,
+        patch_name: str | None,
+        change_area: str | None,
+    ) -> None:
+        display_path = file.path
+        if file.status == FileStatus.RENAMED:
+            display_path = f"{file.source_path} -> {file.target_path}"
+        if patch_name is None:
+            if change_area is None:
+                raise ValueError("A file must belong to a patch or change area.")
+            section = f"{change_area.title()} changes"
+        else:
+            section = patch_name
+        file_node = parent.add(
+            Text(f"{display_path} [{file.status.value}]"),
+            data=TreeItem(
+                title=f"{section} / {display_path}",
+                diff_text=file.diff_text,
+                patch_name=patch_name,
+                file_path=file.path,
+                change_area=change_area,
+            ),
+            expand=bool(file.hunks),
+            allow_expand=bool(file.hunks),
+        )
+        for hunk in file.hunks:
+            file_node.add(
+                Text(hunk.header),
                 data=TreeItem(
-                    title=f"{patch.name} / {display_path}",
-                    diff_text=file.diff_text,
-                    patch_name=patch.name,
+                    title=f"{section} / {display_path} / hunk {hunk.index + 1}",
+                    diff_text=hunk.diff_text,
+                    patch_name=patch_name,
                     file_path=file.path,
+                    hunk_index=hunk.index,
+                    change_area=change_area,
                 ),
-                expand=False,
-                allow_expand=bool(file.hunks),
+                allow_expand=False,
             )
-            for hunk in file.hunks:
-                file_node.add(
-                    Text(hunk.header),
-                    data=TreeItem(
-                        title=f"{patch.name} / {display_path} / hunk {hunk.index + 1}",
-                        diff_text=hunk.diff_text,
-                        patch_name=patch.name,
-                        file_path=file.path,
-                        hunk_index=hunk.index,
-                    ),
-                    allow_expand=False,
-                )

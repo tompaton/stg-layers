@@ -16,30 +16,41 @@ For unified-diff parsing, use an existing library instead of implementing a pars
 
 ## Implementation and prototype findings
 
-- The initial read-only Textual browser is implemented. It uses `stg series` for patch state, `stg show` for diffs, and `unidiff` for file/hunk parsing. On the tested StGit version, `stg show` must receive `--diff-opt=--patch` to produce unified diffs.
+- The initial read-only Textual browser is implemented. It uses `stg series` for patch state, `stg show` for patch diffs, `git diff --cached --patch` for staged changes, `git diff --patch` plus no-index diffs for non-ignored untracked files, and `unidiff` for file/hunk parsing. On the tested StGit version, `stg show` must receive `--diff-opt=--patch` to produce unified diffs.
 - In a disposable stack, staging a worktree hunk and running `stg refresh --index --patch <earlier-applied-patch>` moved that hunk into the earlier patch while leaving a separate unstaged worktree hunk unchanged. The integration test simulates the UI's selection with `git add -p`; the application does not invoke Git's interactive prompt.
 - StGit documents that refreshing a non-top patch creates and merges a temporary patch and may conflict. The successful prototype covers assigning a staged, uncommitted hunk to an earlier applied patch; it does not yet solve relocating a hunk already committed in one patch to another. Keep the application read-only until those behaviors have a safe, tested interaction.
 
 ## Goal
 
-Build a small Python 3.15 terminal application, using Textual, that visualizes StGit patches as layers and their changes as a tree:
+Build a small Python 3.15 terminal application, using Textual, that visualizes an StGit repository as an interactive change tree:
 
 ```text
-patch
-└── file
-    └── hunk
+Repository
+├── Patch stack
+│   └── patch
+│       └── file
+│           └── hunk
+├── Staged changes
+│   └── file
+│       └── hunk
+└── Unstaged changes
+    └── file
+        └── hunk
 ```
 
-The first milestone is a read-only browser for patches, files, and hunks. Its model and adapter should be designed around a subsequent change-level workflow: inspect the current changes, select a file or hunk, and assign it to another patch without making push/pop or `stg refresh --patch` the user's manual workflow. The design must not assume that one file belongs to one patch or that each patch's contents are already an indivisible, finalized unit.
+The first milestone is a read-only browser for the patch stack and current index/worktree changes. The model and adapter should support a subsequent change-level workflow: inspect the current changes, select a file or hunk, and assign it to another patch without making push/pop or `stg refresh --patch` the user's manual workflow. The design must not assume that one file belongs to one patch or that each patch's contents are already an indivisible, finalized unit.
 
 ## Initial scope
 
 - Detect the repository and current branch; report missing Git/StGit, invalid repository state, and command failures clearly.
 - Read the patch series and applied/unapplied status using StGit.
 - Read each patch's changed files and unified diff, then use the selected diff library to obtain file and hunk boundaries. Keep patch identity and hunk identity distinct so multiple hunks from one file can belong to different layers.
-- Display a Textual tree with patch > file > hunk nodes and a diff preview for the selected item.
+- Display a Textual tree with top-level `Patch stack`, `Staged changes`, and `Unstaged changes` groups, in that order. Under the patch stack show patch > file > hunk; under staged and unstaged show file > hunk.
+- Read staged changes with `git diff --cached --patch`. Read unstaged tracked changes with `git diff --patch` and include non-ignored untracked files as additions; parse all diffs with the same library as StGit patch diffs.
+- Show explicit empty states for an empty patch stack and for no staged or unstaged changes.
+- Display a diff preview for the selected patch, staged/unstaged group, file, or hunk.
 - Provide keyboard navigation, expand/collapse, refresh, and useful empty/error states.
-- Do not change the working tree or patch stack in the browser milestone.
+- Do not change the index, working tree, or patch stack in the browser milestone.
 
 ### Not in the first release
 
@@ -53,10 +64,10 @@ Keep the first implementation to four responsibilities:
 
 1. **CLI entry point and app** — start Textual from a `uv tool`-installable console command, resolve the repository working directory, and compose the screen.
 2. **StGit adapter** — run `stg` and `git` with argument arrays (never a shell), capture exit status and stderr, and expose typed operations for stack, file, and diff reads.
-3. **Diff model** — use `unidiff` (or another validated library) to convert unified diffs into typed `Patch`, `FileChange`, and `Hunk` records. Keep original patch names, paths, source diff, and library hunk/line data so the model can support later mutations. Do not write a second unified-diff parser.
+3. **Diff model** — use `unidiff` (or another validated library) to convert StGit patch diffs and staged/unstaged Git diffs into typed `Patch`, `FileChange`, and `Hunk` records. Keep source/category, patch identity, paths, source diff, and library hunk/line data so the model can support later mutations. Do not write a second unified-diff parser.
 4. **Textual widgets** — render the tree and selected diff. Keep widgets independent of subprocess execution and parsing.
 
-Use the StGit CLI as the source of truth for stack membership and patch state. Obtain diffs from `stg show` or Git against the patch commits, whichever proves simplest and most reliable for applied and unapplied patches. Prefer documented structured output or explicit formatting options when available. Delegate diff syntax handling to the chosen library; add only the application-specific mapping and guards needed for quoted paths, renames, binary files, and unsupported diff sections.
+Use the StGit CLI as the source of truth for stack membership and patch state. Obtain patch diffs from `stg show` or Git against the patch commits, whichever proves simplest and most reliable for applied and unapplied patches. Obtain index changes from `git diff --cached --patch` and worktree changes from `git diff --patch`, and include non-ignored untracked files in the unstaged group as additions. Keep these categories separate and do not merge or count changes twice. Disable external diff drivers and text conversion for predictable, read-only output. Prefer documented structured output or explicit formatting options when available. Delegate diff syntax handling to the chosen library; add only the application-specific mapping and guards needed for quoted paths, renames, binary files, and unsupported diff sections.
 
 Keep reading and mutation as separate adapter responsibilities. Before enabling mutation, define what happens to a selected hunk as it is transferred between patch layers, including the relationship between committed patch contents, the index, and worktree changes. Validate stack state before acting, preserve unrelated changes, and never edit StGit's internal metadata directly.
 
@@ -93,14 +104,15 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 
 - Probe the supported StGit commands and output formats against a disposable repository, including applied and unapplied patches.
 - Implement typed subprocess wrappers and actionable error reporting.
-- Parse patch series and map the chosen unified-diff library's file/hunk/line objects into the tree model.
-- Add library behavior tests using representative fixtures, plus integration tests that create a temporary Git repository and StGit stack. Test quoted paths, renames, binary files, and unsupported diff sections without duplicating the library's parser.
+- Read staged and unstaged diffs separately with Git, including non-ignored untracked files under unstaged; map patch series and each diff source into the shared tree model.
+- Parse changes with the chosen unified-diff library's file/hunk/line objects.
+- Add library behavior tests using representative fixtures, plus integration tests that create a temporary Git repository and StGit stack. Verify changes staged and unstaged in the same file remain in distinct groups. Test quoted paths, renames, binary files, and unsupported diff sections without duplicating the library's parser.
 
 ### 4. Build the tree browser
 
-- Render patch > file > hunk nodes and an adjacent diff preview.
+- Render top-level Patch stack, Staged changes, and Unstaged changes groups in that order, with patch > file > hunk and file > hunk trees respectively, plus an adjacent diff preview.
 - Add keyboard navigation, expand/collapse, and refresh.
-- Manually verify behavior for empty patches, unapplied patches, file renames, binary files, and command errors.
+- Manually verify behavior for empty patches, empty staged/unstaged changes, unapplied patches, file renames, binary files, and command errors.
 
 ### 5. Design and validate change assignment
 
@@ -114,9 +126,10 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 ## Acceptance criteria for the initial release
 
 - `uv tool install .` installs a working command on Python 3.15.
-- In an StGit repository, the command displays the stack as an expandable patch > file > hunk tree and previews the selected diff.
+- In an StGit repository, the command displays top-level Patch stack, Staged changes, and Unstaged changes groups in that order. It shows patch > file > hunk in the stack and file > hunk under staged and unstaged (including non-ignored untracked files), and previews the selected diff.
 - It gives a clear error for a missing `stg`/`git`, a non-repository directory, or a failed StGit command.
-- Browsing and refreshing the view do not modify Git or StGit state.
+- Empty staged and unstaged sections are visible when there are no changes in those areas.
+- Browsing and refreshing the view do not modify the index, working tree, or StGit state.
 - pytest, `ty check`, and Ruff linting pass; complexity diagnostics are enabled.
 
 ## Main risks

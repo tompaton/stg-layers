@@ -1,8 +1,8 @@
 # StGit Layers
 
-A read-only Textual browser for StGit patch stacks. It displays each patch as a
-tree of changed files and unified-diff hunks, with a preview for the selected
-node.
+A read-only Textual browser for StGit repositories. It displays the patch stack,
+staged changes, and unstaged changes as expandable file/hunk trees, with a
+preview for the selected node.
 
 ## Requirements
 
@@ -20,9 +20,14 @@ cd /path/to/stgit-repository
 stg-layers
 ```
 
+The tree contains three top-level sections: **Patch stack**, **Staged changes**,
+and **Unstaged changes**. The patch stack expands to patches > files > hunks;
+the staged and unstaged sections expand to files > hunks. Non-ignored untracked
+files appear as additions in **Unstaged changes**.
+
 Press the arrow keys to navigate, Enter to expand or collapse a node, `r` to
-refresh the stack, and `q` to quit. The initial version only reads repository
-state; it does not modify the working tree or patch stack.
+refresh repository state, and `q` to quit. The application only reads Git and
+StGit state; it does not modify the index, working tree, or patch stack.
 
 ## Development
 
