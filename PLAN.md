@@ -14,6 +14,12 @@ The [Hacker News discussion](https://news.ycombinator.com/item?id=41505266) high
 
 For unified-diff parsing, use an existing library instead of implementing a parser. [`unidiff`](https://pypi.org/project/unidiff/) is the leading candidate: its `PatchSet` API exposes files, hunks, and lines and can preserve the original diff text. Confirm its behavior on StGit/Git diff fixtures and Python 3.15 before selecting a version. The suggested [`diff-parser`](https://pypi.org/project/diff-parser/) is worth noting, but its published 1.1 README says block `content` is not implemented, so it does not appear sufficient for rendering or selecting hunks by itself. Re-evaluate it only if a later release supplies the required hunk/line structure. If no maintained compatible library meets requirements, document that finding before writing a narrow parser.
 
+## Implementation and prototype findings
+
+- The initial read-only Textual browser is implemented. It uses `stg series` for patch state, `stg show` for diffs, and `unidiff` for file/hunk parsing. On the tested StGit version, `stg show` must receive `--diff-opt=--patch` to produce unified diffs.
+- In a disposable stack, staging a worktree hunk and running `stg refresh --index --patch <earlier-applied-patch>` moved that hunk into the earlier patch while leaving a separate unstaged worktree hunk unchanged. The integration test simulates the UI's selection with `git add -p`; the application does not invoke Git's interactive prompt.
+- StGit documents that refreshing a non-top patch creates and merges a temporary patch and may conflict. The successful prototype covers assigning a staged, uncommitted hunk to an earlier applied patch; it does not yet solve relocating a hunk already committed in one patch to another. Keep the application read-only until those behaviors have a safe, tested interaction.
+
 ## Goal
 
 Build a small Python 3.15 terminal application, using Textual, that visualizes StGit patches as layers and their changes as a tree:

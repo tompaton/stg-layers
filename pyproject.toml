@@ -1,0 +1,38 @@
+[project]
+name = "stg-layers"
+version = "0.1.0"
+description = "A Textual browser for StGit patch stacks"
+readme = "README.md"
+requires-python = ">=3.15"
+dependencies = [
+    "rich>=15.0.0",
+    "textual>=8.2.8",
+    "unidiff>=1.0.1",
+]
+
+[project.scripts]
+stg-layers = "stg_layers:main"
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+    "ty>=0.0.100",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py315"
+
+[tool.ruff.lint]
+select = ["B", "C901", "E", "F", "I"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 8
