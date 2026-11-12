@@ -95,25 +95,60 @@ def test_app_renders_patch_file_hunk_tree() -> None:
             assert unstaged_hunk.data.change_area == "unstaged"
 
             assert tree.root.is_expanded
+            assert tree.styles.overflow_x == "hidden"
             tree.focus()
-            await pilot.press("down", "down", "enter")
+            await pilot.press("down", "down")
             await pilot.pause()
             title = app.query_one("#selection-title", Static).render()
             assert "Patch: types [notes]" in str(title)
+            preview = app.query_one("#diff-view", TextArea)
+            patch_diff = preview.text
 
-            tree.select_node(hunk_node)
+            await pilot.press("enter")
             await pilot.pause()
-            title = app.query_one("#selection-title", Static).render()
-            diff = app.query_one("#diff-view", TextArea)
-            assert "hunk 1" in str(title)
-            assert "+after" in diff.text
-            assert diff.read_only
-            assert not diff.show_line_numbers
-            assert diff.language == "diff"
-            assert diff.theme == "stg-diff"
-            assert any(name == "attribute" for _, _, name in diff._highlights[0])
-            assert any(name == "diff.minus" for _, _, name in diff._highlights[1])
-            assert any(name == "diff.plus" for _, _, name in diff._highlights[2])
+            assert tree.cursor_node is patch_node
+            assert preview.text == patch_diff
+
+            await pilot.press("right")
+            await pilot.pause()
+            assert tree.cursor_node is file_node
+            assert "example [typing].py" in str(app.query_one("#selection-title", Static).render())
+            await pilot.press("right")
+            await pilot.pause()
+            assert tree.cursor_node is hunk_node
+            assert "hunk 1" in str(app.query_one("#selection-title", Static).render())
+            assert "+after" in preview.text
+            assert preview.read_only
+            assert not preview.show_line_numbers
+            assert preview.language == "diff"
+            assert preview.theme == "stg-diff"
+            assert any(name == "attribute" for _, _, name in preview._highlights[0])
+            assert any(name == "diff.minus" for _, _, name in preview._highlights[1])
+            assert any(name == "diff.plus" for _, _, name in preview._highlights[2])
+
+            await pilot.press("left")
+            await pilot.pause()
+            assert tree.cursor_node is file_node
+            assert "example [typing].py" in preview.text
+            await pilot.press("left")
+            await pilot.pause()
+            assert file_node.is_collapsed
+            await pilot.press("right")
+            await pilot.pause()
+            assert file_node.is_expanded
+            assert tree.cursor_node is file_node
+
+            await pilot.press("down")
+            await pilot.pause()
+            assert tree.cursor_node is hunk_node
+            await pilot.press("down")
+            await pilot.pause()
+            assert tree.cursor_node is staged_group
+            assert "Staged changes" in str(app.query_one("#selection-title", Static).render())
+            await pilot.press("right")
+            await pilot.pause()
+            assert tree.cursor_node is staged_group.children[0]
+            assert "staged.py" in preview.text
 
     asyncio.run(run_app())
 

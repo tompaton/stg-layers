@@ -52,6 +52,35 @@ class StackReader(Protocol):
     def load_unstaged_changes(self) -> tuple[FileChange, ...]: ...
 
 
+class LayerTree(Tree[TreeItem]):
+    BINDINGS = [
+        Binding("enter", "noop", show=False),
+        Binding("left", "collapse_or_parent", show=False),
+        Binding("right", "expand_or_child", show=False),
+    ]
+
+    def action_noop(self) -> None:
+        pass
+
+    def action_collapse_or_parent(self) -> None:
+        node = self.cursor_node
+        if node is None:
+            return
+        if node.allow_expand and node.is_expanded:
+            node.collapse()
+        elif node.parent is not None and node.parent != self.root:
+            self.move_cursor(node.parent, animate=False)
+
+    def action_expand_or_child(self) -> None:
+        node = self.cursor_node
+        if node is None or not node.allow_expand:
+            return
+        if not node.is_expanded:
+            node.expand()
+        elif node.children:
+            self.move_cursor(node.children[0], animate=False)
+
+
 class StgLayersApp(App[None]):
     TITLE = "StGit Layers"
     CSS = """
@@ -62,6 +91,10 @@ class StgLayersApp(App[None]):
     #tree-pane {
         width: 42%;
         border: round $primary;
+    }
+
+    #patch-tree {
+        overflow-x: hidden;
     }
 
     #preview-pane {
@@ -99,7 +132,7 @@ class StgLayersApp(App[None]):
         yield Header()
         with Horizontal(id="main"):
             with Vertical(id="tree-pane"):
-                tree: Tree[TreeItem] = Tree(Text("Repository", style="bold"), id="patch-tree")
+                tree = LayerTree(Text("Repository", style="bold"), id="patch-tree")
                 tree.root.expand()
                 yield tree
             with Vertical(id="preview-pane"):
@@ -135,7 +168,13 @@ class StgLayersApp(App[None]):
 
     @on(Tree.NodeSelected)
     def on_tree_node_selected(self, event: Tree.NodeSelected[TreeItem]) -> None:
-        item = event.node.data
+        self._show_tree_item(event.node.data)
+
+    @on(Tree.NodeHighlighted)
+    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted[TreeItem]) -> None:
+        self._show_tree_item(event.node.data)
+
+    def _show_tree_item(self, item: TreeItem | None) -> None:
         if item is None:
             return
         self.query_one("#selection-title", Static).update(item.title)
