@@ -1,5 +1,6 @@
 import codecs
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Final
 
@@ -189,6 +190,26 @@ class StGitRepository:
 
     def unstage_file(self, path: str) -> None:
         self._run("git", "--literal-pathspecs", "restore", "--staged", "--", path)
+
+    def new_patch_template(self) -> str:
+        with tempfile.TemporaryDirectory(prefix="stg-layers-") as directory:
+            template_path = Path(directory) / "patch-message"
+            self._run("stg", "new", "--save-template", str(template_path))
+            try:
+                return template_path.read_text(encoding="utf-8")
+            except OSError as error:
+                raise RepositoryError(
+                    f"Could not read StGit's patch message template: {error}"
+                ) from error
+
+    def create_patch(self, message: str) -> None:
+        with tempfile.TemporaryDirectory(prefix="stg-layers-") as directory:
+            message_path = Path(directory) / "patch-message"
+            try:
+                message_path.write_text(message, encoding="utf-8")
+            except OSError as error:
+                raise RepositoryError(f"Could not write the patch message: {error}") from error
+            self._run("stg", "new", "--file", str(message_path))
 
     def _cached_file_diff(self, path: str) -> str:
         return self._run(

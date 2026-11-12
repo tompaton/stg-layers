@@ -7,7 +7,8 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Header, Static, TextArea, Tree
+from textual.screen import ModalScreen
+from textual.widgets import Button, Footer, Header, Static, TextArea, Tree
 from textual.widgets._tree import TreeNode
 from textual.widgets.text_area import TextAreaTheme
 from tree_sitter import Language
@@ -65,6 +66,62 @@ class StackReader(Protocol):
 
     def unstage_hunk(self, path: str, hunk_index: int) -> None: ...
 
+    def new_patch_template(self) -> str: ...
+
+    def create_patch(self, message: str) -> None: ...
+
+
+class PatchMessageDialog(ModalScreen[str | None]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+    DEFAULT_CSS = """
+    PatchMessageDialog {
+        align: center middle;
+    }
+
+    #patch-dialog {
+        width: 80%;
+        height: 80%;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #patch-message {
+        height: 1fr;
+    }
+
+    #patch-dialog-actions {
+        height: auto;
+        align-horizontal: right;
+    }
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self.message = message
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="patch-dialog"):
+            yield Static("Edit the patch message, then select Create.")
+            yield TextArea(self.message, id="patch-message", soft_wrap=True)
+            with Horizontal(id="patch-dialog-actions"):
+                yield Button("Cancel", id="cancel-patch")
+                yield Button("Create", id="create-patch", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#patch-message", TextArea).focus()
+
+    @on(Button.Pressed, "#create-patch")
+    def create_patch(self) -> None:
+        self.dismiss(self.query_one("#patch-message", TextArea).text)
+
+    @on(Button.Pressed, "#cancel-patch")
+    def cancel_patch(self) -> None:
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
 
 class LayerTree(Tree[TreeItem]):
     BINDINGS = [
@@ -75,9 +132,13 @@ class LayerTree(Tree[TreeItem]):
             show=False,
             priority=True,
         ),
+        Binding("c", "create_patch", "New patch"),
         Binding("left", "collapse_or_parent", show=False),
         Binding("right", "expand_or_child", show=False),
     ]
+
+    async def action_create_patch(self) -> None:
+        await self.app.run_action("create_patch")
 
     async def action_apply_selected_change(self) -> None:
         await self.app.run_action("apply_selected_change")
@@ -191,6 +252,31 @@ class StgLayersApp(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
+        await self._load_stack()
+
+    async def action_create_patch(self) -> None:
+        self.query_one("#status", Static).update("Preparing a new patch...")
+        try:
+            template = await asyncio.to_thread(self.repository.new_patch_template)
+        except RepositoryError as error:
+            self.query_one("#status", Static).update(f"Error: {error}")
+            return
+
+        await self.push_screen(PatchMessageDialog(template), self._on_patch_message)
+
+    def _on_patch_message(self, message: str | None) -> None:
+        if message is None:
+            self.query_one("#status", Static).update("Patch creation cancelled.")
+            return
+        self.run_worker(self._create_patch(message), exclusive=True)
+
+    async def _create_patch(self, message: str) -> None:
+        self.query_one("#status", Static).update("Creating patch...")
+        try:
+            await asyncio.to_thread(self.repository.create_patch, message)
+        except RepositoryError as error:
+            self.query_one("#status", Static).update(f"Error: {error}")
+            return
         await self._load_stack()
 
     def action_refresh_stack(self) -> None:

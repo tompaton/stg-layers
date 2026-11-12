@@ -41,7 +41,10 @@ With the tree focused, **Enter** stages the selected file or hunk under
 changes**. Hunk actions preserve other hunks in the same file. File actions
 include untracked files. These operations update Git's index but leave the
 working-tree contents and StGit patch stack unchanged. Patch-stack nodes are
-not modified by Enter. Press `r` to refresh repository state and `q` to quit.
+not modified by Enter. Press **c** while the tree is focused to edit StGit's
+new-patch message template; select **Create** to add an empty patch on top of
+the applied stack, or **Cancel**/Escape to leave the stack unchanged. Press
+`r` to refresh repository state and `q` to quit.
 Diff additions, removals, and hunk headers are syntax-highlighted.
 Preview line numbers are omitted because they are not source-file line numbers.
 Tree labels use bold section headings and distinct colors for patch statuses,

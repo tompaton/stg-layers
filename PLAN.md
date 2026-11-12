@@ -124,6 +124,7 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 - Apply semantic Rich styles to tree labels: bold section headings; patch labels in `[status patch-id] title` form with `>`, `+`, `-`, or `~` status markers and the whole bracketed ID colored by status; distinct colors for patch ID, file path/status, and hunk header.
 - Add keyboard navigation, expand/collapse, and refresh.
 - Bind Enter on files and hunks under Staged/Unstaged to Git index operations: stage or unstage a whole file, or only the selected hunk. Keep patch-stack nodes read-only and preserve unrelated hunks; use Git's patch-selection commands through the repository adapter rather than shell fragments or a custom patch parser.
+- Bind `c` in the patch tree to open a message editor initialized with `stg new --save-template`; Create writes the edited template to a temporary file and calls `stg new --file` to add an empty patch at the top of the applied stack. Cancel without changing the stack.
 - Manually verify behavior for empty patches, empty staged/unstaged changes, unapplied patches, file renames, binary files, and command errors.
 
 ### 5. Design and validate patch assignment
@@ -142,6 +143,7 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 - It gives a clear error for a missing `stg`/`git`, a non-repository directory, or a failed StGit command.
 - Empty staged and unstaged sections are visible when there are no changes in those areas.
 - Enter stages or unstages the selected working-change file/hunk without changing working-tree contents or the StGit patch stack; unrelated hunks are preserved.
+- `c` in the patch tree opens StGit's generated patch-message template; creating it adds an empty top patch, and cancelling leaves the stack unchanged.
 - pytest, `ty check`, and Ruff linting pass; complexity diagnostics are enabled.
 
 ## Main risks

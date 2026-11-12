@@ -12,6 +12,7 @@ class FixtureRepository:
 
     def __init__(self) -> None:
         self.actions: list[tuple[str, str, int | None]] = []
+        self.created_messages: list[str] = []
 
     def _file_change(self, path: str, prefix: str, content: str) -> FileChange:
         hunk = DiffHunk(
@@ -59,6 +60,12 @@ class FixtureRepository:
 
     def unstage_hunk(self, path: str, hunk_index: int) -> None:
         self.actions.append(("unstage_hunk", path, hunk_index))
+
+    def new_patch_template(self) -> str:
+        return "Patch: \nAuthor: Test <test@example.invalid>\n\n# Edit this message\n"
+
+    def create_patch(self, message: str) -> None:
+        self.created_messages.append(message)
 
 
 def test_app_renders_patch_file_hunk_tree() -> None:
@@ -234,6 +241,48 @@ def test_enter_stages_or_unstages_selected_files_and_hunks() -> None:
                 ("stage_hunk", "unstaged.py", 0),
                 ("unstage_file", "staged.py", None),
             ]
+
+    asyncio.run(run_app())
+
+
+def test_create_patch_dialog_passes_edited_template_to_repository() -> None:
+    async def run_app() -> None:
+        repository = FixtureRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#patch-tree", Tree).focus()
+            await pilot.press("c")
+            await pilot.pause()
+
+            message = app.screen.query_one("#patch-message", TextArea)
+            assert message.text == repository.new_patch_template()
+            edited_message = "Patch: dialog-created\nAuthor: Test <test@example.invalid>\n"
+            message.load_text(edited_message)
+            await pilot.click("#create-patch")
+            await pilot.pause()
+
+            assert repository.created_messages == [edited_message]
+            assert not list(app.query("#patch-message"))
+
+    asyncio.run(run_app())
+
+
+def test_create_patch_dialog_can_be_cancelled() -> None:
+    async def run_app() -> None:
+        repository = FixtureRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.query_one("#patch-tree", Tree).focus()
+            await pilot.press("c")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+
+            assert repository.created_messages == []
+            assert not list(app.query("#patch-message"))
+            assert "cancelled" in str(app.query_one("#status", Static).render()).lower()
 
     asyncio.run(run_app())
 
