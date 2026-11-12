@@ -40,7 +40,9 @@ reads Git and StGit state; it does not modify the index, working tree, or patch
 stack. Diff additions, removals, and hunk headers are syntax-highlighted.
 Preview line numbers are omitted because they are not source-file line numbers.
 Tree labels use bold section headings and distinct colors for patch statuses,
-patch names, file paths, and file statuses.
+patch names, file paths, and file statuses. Patch labels display as
+`[status patch-id] title`, with the status marker and patch ID sharing the
+status color: `>`, `+`, `-`, and `~`.
 
 ## Development
 

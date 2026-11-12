@@ -50,7 +50,7 @@ The first milestone is a read-only browser for the patch stack and current index
 - Show explicit empty states for an empty patch stack and for no staged or unstaged changes.
 - Start with top-level sections, patches, and files expanded so files are visible immediately; keep each file's hunks collapsed until expanded with Right.
 - Display the selected patch, staged/unstaged group, file, or hunk diff in a read-only, focusable TextArea with scrolling and Tree-sitter highlighting for additions, removals, and hunk headers. Do not show sequential preview line numbers, which do not correspond to source-file line numbers.
-- Style tree labels so section headings are bold, patch names and status markers are distinct, file paths and file statuses are distinguishable, and hunk headers are easy to scan.
+- Style tree labels so section headings are bold, patch labels use `[status patch-id] title` with `>`, `+`, `-`, or `~` status markers and the whole bracketed ID colored by status, file paths and file statuses are distinguishable, and hunk headers are easy to scan.
 - Up/Down moves between visible nodes; Right expands a collapsed node or moves to the first child; Left collapses an expanded node or moves to its parent. Highlighting a node immediately updates the preview; Enter has no action until a tree action is introduced.
 - Tab moves focus between the tree and preview. Hide horizontal overflow in the tree rather than showing a horizontal scrollbar.
 - Provide refresh and useful empty/error states.
@@ -121,7 +121,7 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 - Bind Up/Down to visible-node navigation, Left/Right to collapse/parent and expand/first-child behavior, and make Enter a no-op. Update the preview immediately on node highlighting. Disable horizontal tree overflow so long labels are clipped rather than adding a horizontal scrollbar.
 - Default to newest-first navigation: unstaged, staged, then patches newest to oldest. Shift+R switches to the existing oldest-first order; keep the order indicator in the status bar.
 - Start with all top-level sections and patches expanded, and file nodes collapsed so hunks are hidden until requested.
-- Apply semantic Rich styles to tree labels: bold section headings; distinct colors for patch status, patch name, file path/status, and hunk header.
+- Apply semantic Rich styles to tree labels: bold section headings; patch labels in `[status patch-id] title` form with `>`, `+`, `-`, or `~` status markers and the whole bracketed ID colored by status; distinct colors for patch ID, file path/status, and hunk header.
 - Add keyboard navigation, expand/collapse, and refresh.
 - Manually verify behavior for empty patches, empty staged/unstaged changes, unapplied patches, file renames, binary files, and command errors.
 

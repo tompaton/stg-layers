@@ -69,8 +69,8 @@ def test_app_renders_patch_file_hunk_tree() -> None:
             assert isinstance(file_node.label, Text)
             assert isinstance(hunk_node.label, Text)
             assert str(patch_stack.label.style) == "bold cyan"
+            assert str(patch_node.label) == "[>types [notes]] Type [annotations]"
             assert str(patch_node.label.spans[0].style) == "bold green"
-            assert str(patch_node.label.spans[1].style) == "bold"
             assert str(file_node.label.spans[0].style) == "cyan"
             assert str(file_node.label.spans[1].style) == "blue"
             assert str(hunk_node.label.style) == "yellow"
@@ -249,5 +249,44 @@ def test_order_toggle_reverses_sections_and_patch_sequence() -> None:
                 "Patch stack",
             ]
             assert "newest first" in str(app.query_one("#status", Static).render())
+
+    asyncio.run(run_app())
+
+
+def test_patch_labels_use_compact_ids_titles_and_status_markers() -> None:
+    class PatchStatusRepository(FixtureRepository):
+        def load_stack(self) -> tuple[Patch, ...]:
+            return tuple(
+                Patch(name=name, status=status, description="Patch title", files=())
+                for name, status in (
+                    ("current", PatchStatus.CURRENT),
+                    ("applied", PatchStatus.APPLIED),
+                    ("unapplied", PatchStatus.UNAPPLIED),
+                    ("hidden", PatchStatus.HIDDEN),
+                )
+            )
+
+        def load_staged_changes(self) -> tuple[FileChange, ...]:
+            return ()
+
+        def load_unstaged_changes(self) -> tuple[FileChange, ...]:
+            return ()
+
+    async def run_app() -> None:
+        app = StgLayersApp(PatchStatusRepository())
+        async with app.run_test():
+            tree = app.query_one("#patch-tree", Tree)
+            patch_stack = tree.root.children[2]
+            assert [str(node.label) for node in patch_stack.children] == [
+                "[~hidden] Patch title",
+                "[-unapplied] Patch title",
+                "[+applied] Patch title",
+                "[>current] Patch title",
+            ]
+            assert [
+                str(node.label.spans[0].style)
+                for node in patch_stack.children
+                if isinstance(node.label, Text)
+            ] == ["dim magenta", "yellow", "cyan", "bold green"]
 
     asyncio.run(run_app())

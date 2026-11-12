@@ -33,6 +33,12 @@ _PATCH_STATUS_STYLES = {
     PatchStatus.UNAPPLIED: "yellow",
     PatchStatus.HIDDEN: "dim magenta",
 }
+_PATCH_STATUS_MARKERS = {
+    PatchStatus.CURRENT: ">",
+    PatchStatus.APPLIED: "+",
+    PatchStatus.UNAPPLIED: "-",
+    PatchStatus.HIDDEN: "~",
+}
 _FILE_STATUS_STYLES = {
     FileStatus.ADDED: "green",
     FileStatus.DELETED: "red",
@@ -281,11 +287,11 @@ class StgLayersApp(App[None]):
     @staticmethod
     def _add_patch(parent: TreeNode[TreeItem], patch: Patch) -> None:
         label = Text()
-        label.append(f"[{patch.status.value}]", style=_PATCH_STATUS_STYLES[patch.status])
-        label.append(f" {patch.name}", style="bold")
+        status_style = _PATCH_STATUS_STYLES[patch.status]
+        label.append(f"[{_PATCH_STATUS_MARKERS[patch.status]}{patch.name}]", style=status_style)
         if patch.description:
-            label.append(" - ", style="dim")
-            label.append(patch.description, style="dim")
+            label.append(" ")
+            label.append(patch.description, style="bold")
         patch_node = parent.add(
             label,
             data=TreeItem(
@@ -319,7 +325,7 @@ class StgLayersApp(App[None]):
         else:
             section = patch_name
         label = Text()
-        label.append(display_path, style="cyan")
+        label.append(display_path)
         label.append(f" [{file.status.value}]", style=_FILE_STATUS_STYLES[file.status])
         file_node = parent.add(
             label,
