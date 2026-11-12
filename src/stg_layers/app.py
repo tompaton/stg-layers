@@ -297,7 +297,7 @@ class StgLayersApp(App[None]):
                 file_path=file.path,
                 change_area=change_area,
             ),
-            expand=bool(file.hunks),
+            expand=False,
             allow_expand=bool(file.hunks),
         )
         for hunk in file.hunks:

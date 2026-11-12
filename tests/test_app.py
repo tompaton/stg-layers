@@ -80,6 +80,10 @@ def test_app_renders_patch_file_hunk_tree() -> None:
             assert hunk_node.data.hunk_index == 0
             assert app.sub_title == "feature/read-browser"
 
+            assert patch_stack.is_expanded
+            assert patch_node.is_expanded
+            assert file_node.is_collapsed
+
             staged_group = tree.root.children[1]
             staged_file = staged_group.children[0]
             staged_hunk = staged_file.children[0]
@@ -113,6 +117,10 @@ def test_app_renders_patch_file_hunk_tree() -> None:
             await pilot.pause()
             assert tree.cursor_node is file_node
             assert "example [typing].py" in str(app.query_one("#selection-title", Static).render())
+            await pilot.press("right")
+            await pilot.pause()
+            assert tree.cursor_node is file_node
+            assert file_node.is_expanded
             await pilot.press("right")
             await pilot.pause()
             assert tree.cursor_node is hunk_node

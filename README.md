@@ -22,8 +22,9 @@ stg-layers
 
 The tree contains three top-level sections: **Patch stack**, **Staged changes**,
 and **Unstaged changes**. The patch stack expands to patches > files > hunks;
-the staged and unstaged sections expand to files > hunks. Non-ignored untracked
-files appear as additions in **Unstaged changes**.
+the staged and unstaged sections expand to files > hunks. On startup, sections
+and patches are expanded to show their files, while each file's hunks are
+collapsed. Non-ignored untracked files appear as additions in **Unstaged changes**.
 
 Use **Up/Down** to move between visible nodes. **Right** expands a node or moves
 to its first child; **Left** collapses a node or moves to its parent. The preview
