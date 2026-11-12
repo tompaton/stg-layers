@@ -30,7 +30,9 @@ refresh repository state, and `q` to quit. The application only reads Git and
 StGit state; it does not modify the index, working tree, or patch stack.
 Press Tab to focus the read-only diff preview; use Page Up/Page Down or the
 mouse wheel to scroll it. Diff additions, removals, and hunk headers are
-syntax-highlighted.
+syntax-highlighted. Preview line numbers are omitted because they are not
+source-file line numbers. Tree labels use bold section headings and distinct
+colors for patch statuses, patch names, file paths, and file statuses.
 
 ## Development
 

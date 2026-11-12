@@ -14,7 +14,7 @@ from tree_sitter import Language
 from tree_sitter_diff import HIGHLIGHTS_QUERY
 from tree_sitter_diff import language as diff_language
 
-from stg_layers.models import FileChange, FileStatus, Patch, TreeItem
+from stg_layers.models import FileChange, FileStatus, Patch, PatchStatus, TreeItem
 from stg_layers.repository import RepositoryError
 
 _DIFF_THEME = TextAreaTheme(
@@ -27,6 +27,19 @@ _DIFF_THEME = TextAreaTheme(
         "attribute": Style(color="#c678dd"),
     },
 )
+_PATCH_STATUS_STYLES = {
+    PatchStatus.CURRENT: "bold green",
+    PatchStatus.APPLIED: "cyan",
+    PatchStatus.UNAPPLIED: "yellow",
+    PatchStatus.HIDDEN: "dim magenta",
+}
+_FILE_STATUS_STYLES = {
+    FileStatus.ADDED: "green",
+    FileStatus.DELETED: "red",
+    FileStatus.RENAMED: "yellow",
+    FileStatus.BINARY: "magenta",
+    FileStatus.MODIFIED: "blue",
+}
 
 
 class StackReader(Protocol):
@@ -86,7 +99,7 @@ class StgLayersApp(App[None]):
         yield Header()
         with Horizontal(id="main"):
             with Vertical(id="tree-pane"):
-                tree: Tree[TreeItem] = Tree("Repository", id="patch-tree")
+                tree: Tree[TreeItem] = Tree(Text("Repository", style="bold"), id="patch-tree")
                 tree.root.expand()
                 yield tree
             with Vertical(id="preview-pane"):
@@ -95,7 +108,7 @@ class StgLayersApp(App[None]):
                     "",
                     read_only=True,
                     show_cursor=False,
-                    show_line_numbers=True,
+                    show_line_numbers=False,
                     soft_wrap=False,
                     compact=True,
                     id="diff-view",
@@ -160,7 +173,7 @@ class StgLayersApp(App[None]):
         tree = self.query_one("#patch-tree", Tree)
         tree.root.remove_children()
         patch_stack = tree.root.add(
-            Text("Patch stack"),
+            Text("Patch stack", style="bold cyan"),
             data=TreeItem(title="Patch stack", diff_text=""),
             expand=True,
         )
@@ -181,7 +194,7 @@ class StgLayersApp(App[None]):
         files: tuple[FileChange, ...],
     ) -> None:
         group = parent.add(
-            Text(label),
+            Text(label, style="bold cyan"),
             data=TreeItem(title=label, diff_text="", change_area=change_area),
             expand=True,
             allow_expand=True,
@@ -195,12 +208,14 @@ class StgLayersApp(App[None]):
 
     @staticmethod
     def _add_patch(parent: TreeNode[TreeItem], patch: Patch) -> None:
-        status = f"[{patch.status.value}]"
-        label = f"{status} {patch.name}"
+        label = Text()
+        label.append(f"[{patch.status.value}]", style=_PATCH_STATUS_STYLES[patch.status])
+        label.append(f" {patch.name}", style="bold")
         if patch.description:
-            label = f"{label} - {patch.description}"
+            label.append(" - ", style="dim")
+            label.append(patch.description, style="dim")
         patch_node = parent.add(
-            Text(label),
+            label,
             data=TreeItem(
                 title=f"Patch: {patch.name}",
                 diff_text=patch.diff_text,
@@ -231,8 +246,11 @@ class StgLayersApp(App[None]):
             section = f"{change_area.title()} changes"
         else:
             section = patch_name
+        label = Text()
+        label.append(display_path, style="cyan")
+        label.append(f" [{file.status.value}]", style=_FILE_STATUS_STYLES[file.status])
         file_node = parent.add(
-            Text(f"{display_path} [{file.status.value}]"),
+            label,
             data=TreeItem(
                 title=f"{section} / {display_path}",
                 diff_text=file.diff_text,
@@ -245,7 +263,7 @@ class StgLayersApp(App[None]):
         )
         for hunk in file.hunks:
             file_node.add(
-                Text(hunk.header),
+                Text(hunk.header, style="yellow"),
                 data=TreeItem(
                     title=f"{section} / {display_path} / hunk {hunk.index + 1}",
                     diff_text=hunk.diff_text,

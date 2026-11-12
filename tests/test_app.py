@@ -1,5 +1,6 @@
 import asyncio
 
+from rich.text import Text
 from textual.widgets import Static, TextArea, Tree
 
 from stg_layers.app import StgLayersApp
@@ -63,6 +64,16 @@ def test_app_renders_patch_file_hunk_tree() -> None:
             assert "types [notes]" in str(patch_node.label)
             assert "example [typing].py" in str(file_node.label)
             assert "@@ -1 +1 @@" in str(hunk_node.label)
+            assert isinstance(patch_stack.label, Text)
+            assert isinstance(patch_node.label, Text)
+            assert isinstance(file_node.label, Text)
+            assert isinstance(hunk_node.label, Text)
+            assert str(patch_stack.label.style) == "bold cyan"
+            assert str(patch_node.label.spans[0].style) == "bold green"
+            assert str(patch_node.label.spans[1].style) == "bold"
+            assert str(file_node.label.spans[0].style) == "cyan"
+            assert str(file_node.label.spans[1].style) == "blue"
+            assert str(hunk_node.label.style) == "yellow"
             assert hunk_node.data is not None
             assert hunk_node.data.patch_name == "types [notes]"
             assert hunk_node.data.file_path == "example [typing].py"
@@ -97,6 +108,7 @@ def test_app_renders_patch_file_hunk_tree() -> None:
             assert "hunk 1" in str(title)
             assert "+after" in diff.text
             assert diff.read_only
+            assert not diff.show_line_numbers
             assert diff.language == "diff"
             assert diff.theme == "stg-diff"
             assert any(name == "attribute" for _, _, name in diff._highlights[0])
