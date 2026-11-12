@@ -49,7 +49,11 @@ Create applies the edited message to the selected patch; cancelling leaves it
 unchanged. Press **Ctrl+Down** on a file under **Staged changes** to move its
 staged contents into the current patch. Other staged files are temporarily
 preserved and restored after the refresh; unstaged changes remain in the
-working tree. Press `r` to refresh repository state and `q` to quit.
+working tree. Press **Ctrl+Up** on a file under the current patch to spill its
+change into **Staged changes**. Other staged files are temporarily preserved;
+if the selected file already has staged changes, unstage those first. Hunks and
+files in other patches are not moved by this shortcut. Press `r` to refresh
+repository state and `q` to quit.
 Diff additions, removals, and hunk headers are syntax-highlighted.
 Preview line numbers are omitted because they are not source-file line numbers.
 Tree labels use bold section headings and distinct colors for patch statuses,

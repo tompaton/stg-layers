@@ -337,6 +337,38 @@ class StGitRepository:
 
         self._restore_staged_changes(saved_changes)
 
+    def spill_current_patch_file(self, path: str) -> None:
+        path_groups = self._staged_path_groups()
+        if any(path in group for group in path_groups):
+            raise RepositoryError(
+                f"Cannot spill {path!r} while it has staged changes. Unstage those changes "
+                "first so they are not mixed with the patch contents."
+            )
+
+        staged_paths = tuple(staged_path for group in path_groups for staged_path in group)
+        saved_changes = self._save_other_staged_changes(set(), staged_paths)
+        unstaged_changes: list[tuple[str, str]] = []
+        try:
+            for change in saved_changes:
+                self._run(
+                    "git",
+                    "--literal-pathspecs",
+                    "restore",
+                    "--staged",
+                    "--",
+                    change[0],
+                )
+                unstaged_changes.append(change)
+            self._run("stg", "spill", "--", path)
+        except RepositoryError as error:
+            try:
+                self._restore_staged_changes(unstaged_changes)
+            except RepositoryError as restore_error:
+                raise RepositoryError(f"{error} {restore_error}") from error
+            raise
+
+        self._restore_staged_changes(saved_changes)
+
     def _cached_file_diff(self, path: str) -> str:
         return self._run(
             "git",

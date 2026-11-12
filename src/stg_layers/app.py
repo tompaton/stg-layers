@@ -76,6 +76,8 @@ class StackReader(Protocol):
 
     def refresh_staged_file_to_current_patch(self, path: str) -> None: ...
 
+    def spill_current_patch_file(self, path: str) -> None: ...
+
 
 class PatchMessageDialog(ModalScreen[str | None]):
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
@@ -147,12 +149,22 @@ class LayerTree(Tree[TreeItem]):
             show=False,
             priority=True,
         ),
+        Binding(
+            "ctrl+up",
+            "spill_current_patch_file",
+            "Move current-patch file to staged changes",
+            show=False,
+            priority=True,
+        ),
         Binding("left", "collapse_or_parent", show=False),
         Binding("right", "expand_or_child", show=False),
     ]
 
     async def action_move_staged_file_to_current_patch(self) -> None:
         await self.app.run_action("move_staged_file_to_current_patch")
+
+    async def action_spill_current_patch_file(self) -> None:
+        await self.app.run_action("spill_current_patch_file")
 
     async def action_edit_patch(self) -> None:
         await self.app.run_action("edit_selected_patch")
@@ -393,6 +405,33 @@ class StgLayersApp(App[None]):
                 self.repository.refresh_staged_file_to_current_patch,
                 item.file_path,
             )
+        except RepositoryError as error:
+            self.query_one("#status", Static).update(f"Error: {error}")
+            return
+        await self._load_stack()
+
+    async def action_spill_current_patch_file(self) -> None:
+        tree = self.query_one("#patch-tree", LayerTree)
+        node = tree.cursor_node
+        item = node.data if node is not None else None
+        if (
+            item is None
+            or item.patch_name is None
+            or item.file_path is None
+            or item.hunk_index is not None
+            or self._loaded_data is None
+            or not any(
+                patch.name == item.patch_name and patch.status == PatchStatus.CURRENT
+                for patch in self._loaded_data[0]
+            )
+        ):
+            return
+
+        self.query_one("#status", Static).update(
+            f"Moving {item.file_path} out of the current patch..."
+        )
+        try:
+            await asyncio.to_thread(self.repository.spill_current_patch_file, item.file_path)
         except RepositoryError as error:
             self.query_one("#status", Static).update(f"Error: {error}")
             return

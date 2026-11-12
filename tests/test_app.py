@@ -15,6 +15,7 @@ class FixtureRepository:
         self.created_messages: list[str] = []
         self.edited_patches: list[tuple[str, str]] = []
         self.moved_files: list[str] = []
+        self.spilled_files: list[str] = []
 
     def _file_change(self, path: str, prefix: str, content: str) -> FileChange:
         hunk = DiffHunk(
@@ -77,6 +78,9 @@ class FixtureRepository:
 
     def refresh_staged_file_to_current_patch(self, path: str) -> None:
         self.moved_files.append(path)
+
+    def spill_current_patch_file(self, path: str) -> None:
+        self.spilled_files.append(path)
 
 
 def test_app_renders_patch_file_hunk_tree() -> None:
@@ -372,6 +376,31 @@ def test_ctrl_down_moves_only_a_staged_file_to_the_current_patch() -> None:
             tree.move_cursor(patch_node)
             await pilot.press("ctrl+down")
             assert repository.moved_files == ["staged.py"]
+
+    asyncio.run(run_app())
+
+
+def test_ctrl_up_spills_only_a_current_patch_file() -> None:
+    async def run_app() -> None:
+        repository = FixtureRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            current_patch_file = tree.root.children[2].children[0].children[0]
+            tree.move_cursor(current_patch_file)
+            await pilot.press("ctrl+up")
+            await pilot.pause()
+            assert repository.spilled_files == ["example [typing].py"]
+
+            current_patch_file = tree.root.children[2].children[0].children[0]
+            current_patch_file.expand()
+            tree.move_cursor(current_patch_file.children[0])
+            await pilot.press("ctrl+up")
+            staged_file = tree.root.children[1].children[0]
+            tree.move_cursor(staged_file)
+            await pilot.press("ctrl+up")
+            assert repository.spilled_files == ["example [typing].py"]
 
     asyncio.run(run_app())
 

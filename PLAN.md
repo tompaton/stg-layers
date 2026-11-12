@@ -127,6 +127,7 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 - Bind `c` in the patch tree to open a message editor initialized with `stg new --save-template`; Create writes the edited template to a temporary file and calls `stg new --file` to add an empty patch at the top of the applied stack. Cancel without changing the stack.
 - Bind `e` on a patch node to open the same editor with `stg edit --save-template <file> <patch>`; Create applies the edited message with `stg edit --file <file> <patch>`. Keep non-patch tree nodes inert and allow any patch in the stack.
 - Bind Ctrl+Down on a file under Staged changes to refresh its staged contents into the current patch with `stg refresh --index`. Because the installed StGit version disallows path arguments with `--index`, temporarily remove other staged file changes from the index and restore them after the refresh; preserve unstaged worktree changes.
+- Bind Ctrl+Up on a file under the current patch to use `stg spill -- <file>` and move the patch change into Staged changes. Preserve unrelated staged files around `stg spill`, which requires a clean index; reject the operation if the selected file itself already has staged changes, and leave its unstaged worktree edits intact.
 - Manually verify behavior for empty patches, empty staged/unstaged changes, unapplied patches, file renames, binary files, and command errors.
 
 ### 5. Design and validate patch assignment
@@ -148,6 +149,7 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 - `c` in the patch tree opens StGit's generated patch-message template; creating it adds an empty top patch, and cancelling leaves the stack unchanged.
 - `e` on any patch node edits its StGit-generated message; other tree nodes do not trigger patch editing, and cancelling leaves the patch unchanged.
 - Ctrl+Down on a staged file moves its staged contents into the current patch while preserving unrelated staged files and unstaged worktree changes.
+- Ctrl+Up on a current-patch file spills its patch change into the index while preserving unrelated staged files and unstaged worktree changes; other patch files and hunk nodes are not acted on.
 - pytest, `ty check`, and Ruff linting pass; complexity diagnostics are enabled.
 
 ## Main risks
