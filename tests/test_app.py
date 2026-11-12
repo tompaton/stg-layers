@@ -14,6 +14,7 @@ class FixtureRepository:
         self.actions: list[tuple[str, str, int | None]] = []
         self.created_messages: list[str] = []
         self.edited_patches: list[tuple[str, str]] = []
+        self.moved_files: list[str] = []
 
     def _file_change(self, path: str, prefix: str, content: str) -> FileChange:
         hunk = DiffHunk(
@@ -73,6 +74,9 @@ class FixtureRepository:
 
     def edit_patch(self, patch_name: str, message: str) -> None:
         self.edited_patches.append((patch_name, message))
+
+    def refresh_staged_file_to_current_patch(self, path: str) -> None:
+        self.moved_files.append(path)
 
 
 def test_app_renders_patch_file_hunk_tree() -> None:
@@ -341,6 +345,33 @@ def test_edit_patch_is_ignored_when_a_file_is_selected_and_cancel_works() -> Non
 
             assert repository.edited_patches == []
             assert "cancelled" in str(app.query_one("#status", Static).render()).lower()
+
+    asyncio.run(run_app())
+
+
+def test_ctrl_down_moves_only_a_staged_file_to_the_current_patch() -> None:
+    async def run_app() -> None:
+        repository = FixtureRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            staged_file = tree.root.children[1].children[0]
+            tree.move_cursor(staged_file)
+            await pilot.press("ctrl+down")
+            await pilot.pause()
+
+            assert repository.moved_files == ["staged.py"]
+
+            staged_file = tree.root.children[1].children[0]
+            staged_file.expand()
+            staged_hunk = staged_file.children[0]
+            tree.move_cursor(staged_hunk)
+            await pilot.press("ctrl+down")
+            patch_node = tree.root.children[2].children[0]
+            tree.move_cursor(patch_node)
+            await pilot.press("ctrl+down")
+            assert repository.moved_files == ["staged.py"]
 
     asyncio.run(run_app())
 

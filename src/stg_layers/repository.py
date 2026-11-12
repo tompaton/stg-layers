@@ -233,6 +233,110 @@ class StGitRepository:
                 raise RepositoryError(f"Could not write the patch message: {error}") from error
             self._run("stg", "edit", "--file", str(message_path), patch_ref)
 
+    def _staged_path_groups(self) -> tuple[tuple[str, ...], ...]:
+        fields = self._run(
+            "git",
+            "--literal-pathspecs",
+            "diff",
+            "--cached",
+            "--name-status",
+            "--find-renames",
+            "-z",
+        ).split("\0")
+        groups: list[tuple[str, ...]] = []
+        index = 0
+        while index < len(fields) and fields[index]:
+            status = fields[index]
+            index += 1
+            path_count = 2 if status.startswith(("R", "C")) else 1
+            paths = tuple(fields[index : index + path_count])
+            index += path_count
+            if len(paths) != path_count:
+                raise RepositoryError("Git returned incomplete staged file status.")
+            groups.append(paths)
+        return tuple(groups)
+
+    def _staged_file_diff(self, path: str) -> str:
+        return self._run(
+            "git",
+            "--literal-pathspecs",
+            "diff",
+            "--cached",
+            "--binary",
+            "--full-index",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--",
+            path,
+        )
+
+    def _save_other_staged_changes(
+        self,
+        selected_paths: set[str],
+        staged_paths: tuple[str, ...],
+    ) -> list[tuple[str, str]]:
+        return [
+            (path, diff)
+            for path in staged_paths
+            if path not in selected_paths
+            if (diff := self._staged_file_diff(path))
+        ]
+
+    def _restore_staged_changes(self, changes: list[tuple[str, str]]) -> None:
+        failed_paths: list[str] = []
+        for path, diff in changes:
+            try:
+                self._run("git", "apply", "--cached", "--binary", input_text=diff)
+            except RepositoryError:
+                failed_paths.append(path)
+        if failed_paths:
+            paths = ", ".join(repr(path) for path in failed_paths)
+            raise RepositoryError(
+                f"Could not restore staged changes for {paths} after refreshing the current "
+                "patch. Those changes remain unstaged."
+            )
+
+    def refresh_staged_file_to_current_patch(self, path: str) -> None:
+        path_groups = self._staged_path_groups()
+        selected_paths = {path}
+        for group in path_groups:
+            if path in group:
+                selected_paths.update(group)
+                break
+        else:
+            raise RepositoryError(f"No staged changes remain for {path!r}.")
+
+        staged_paths = tuple(
+            staged_path
+            for group in path_groups
+            for staged_path in group
+            if staged_path not in selected_paths
+        )
+        saved_changes = self._save_other_staged_changes(selected_paths, staged_paths)
+        restored_paths: list[tuple[str, str]] = []
+        try:
+            for change in saved_changes:
+                self._run(
+                    "git",
+                    "--literal-pathspecs",
+                    "restore",
+                    "--staged",
+                    "--",
+                    change[0],
+                )
+                restored_paths.append(change)
+            self._run("stg", "refresh", "--index")
+        except RepositoryError as error:
+            try:
+                self._restore_staged_changes(restored_paths)
+            except RepositoryError as restore_error:
+                raise RepositoryError(f"{error} {restore_error}") from restore_error
+            raise
+
+        self._restore_staged_changes(saved_changes)
+
     def _cached_file_diff(self, path: str) -> str:
         return self._run(
             "git",

@@ -74,6 +74,8 @@ class StackReader(Protocol):
 
     def edit_patch(self, patch_name: str, message: str) -> None: ...
 
+    def refresh_staged_file_to_current_patch(self, path: str) -> None: ...
+
 
 class PatchMessageDialog(ModalScreen[str | None]):
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
@@ -138,9 +140,19 @@ class LayerTree(Tree[TreeItem]):
         ),
         Binding("c", "create_patch", "New patch"),
         Binding("e", "edit_patch", "Edit patch"),
+        Binding(
+            "ctrl+down",
+            "move_staged_file_to_current_patch",
+            "Move staged file to current patch",
+            show=False,
+            priority=True,
+        ),
         Binding("left", "collapse_or_parent", show=False),
         Binding("right", "expand_or_child", show=False),
     ]
+
+    async def action_move_staged_file_to_current_patch(self) -> None:
+        await self.app.run_action("move_staged_file_to_current_patch")
 
     async def action_edit_patch(self) -> None:
         await self.app.run_action("edit_selected_patch")
@@ -359,6 +371,31 @@ class StgLayersApp(App[None]):
             self.query_one("#status", Static).update(f"Error: {error}")
             return
 
+        await self._load_stack()
+
+    async def action_move_staged_file_to_current_patch(self) -> None:
+        tree = self.query_one("#patch-tree", LayerTree)
+        node = tree.cursor_node
+        item = node.data if node is not None else None
+        if (
+            item is None
+            or item.change_area != "staged"
+            or item.file_path is None
+            or item.hunk_index is not None
+        ):
+            return
+
+        self.query_one("#status", Static).update(
+            f"Moving staged file {item.file_path} into the current patch..."
+        )
+        try:
+            await asyncio.to_thread(
+                self.repository.refresh_staged_file_to_current_patch,
+                item.file_path,
+            )
+        except RepositoryError as error:
+            self.query_one("#status", Static).update(f"Error: {error}")
+            return
         await self._load_stack()
 
     def action_toggle_order(self) -> None:

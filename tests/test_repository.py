@@ -322,6 +322,73 @@ def test_load_staged_and_unstaged_changes_separately(tmp_path: Path) -> None:
     assert "+untracked content" in unstaged[1].diff_text
 
 
+@pytest.mark.skipif(
+    shutil.which("git") is None or shutil.which("stg") is None,
+    reason="Git and StGit are required for integration tests",
+)
+def test_refresh_staged_file_moves_only_selected_file_into_current_patch(
+    tmp_path: Path,
+) -> None:
+    environment = _git_environment()
+    _create_two_patch_stack(tmp_path, environment)
+    repository = StGitRepository.discover(tmp_path)
+
+    selected_file = tmp_path / "other.txt"
+    selected_file.write_text(
+        selected_file.read_text(encoding="utf-8") + "selected staged\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "base.txt").write_text(
+        (tmp_path / "base.txt").read_text(encoding="utf-8") + "other staged\n",
+        encoding="utf-8",
+    )
+    _run(tmp_path, environment, "git", "add", "--", "other.txt", "base.txt")
+    selected_file.write_text(
+        selected_file.read_text(encoding="utf-8") + "selected unstaged\n",
+        encoding="utf-8",
+    )
+
+    repository.refresh_staged_file_to_current_patch("other.txt")
+
+    patches = repository.load_stack()
+    current_patch = next(patch for patch in patches if patch.status == PatchStatus.CURRENT)
+    assert current_patch.name == "second"
+    assert "+selected staged" in current_patch.diff_text
+    assert "+selected unstaged" not in current_patch.diff_text
+    staged_diff = _run(tmp_path, environment, "git", "diff", "--cached")
+    unstaged_diff = _run(tmp_path, environment, "git", "diff", "--")
+    assert "+other staged" in staged_diff
+    assert "+selected staged" not in staged_diff
+    assert "+selected unstaged" in unstaged_diff
+    assert "+other staged" not in unstaged_diff
+
+
+@pytest.mark.skipif(
+    shutil.which("git") is None or shutil.which("stg") is None,
+    reason="Git and StGit are required for integration tests",
+)
+def test_refresh_staged_rename_moves_both_paths_into_current_patch(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_two_patch_stack(tmp_path, environment)
+    repository = StGitRepository.discover(tmp_path)
+    _run(tmp_path, environment, "git", "mv", "other.txt", "renamed.txt")
+
+    repository.refresh_staged_file_to_current_patch("renamed.txt")
+
+    current_patch = next(
+        patch
+        for patch in repository.load_stack()
+        if patch.status == PatchStatus.CURRENT
+    )
+    assert {
+        (file.path, file.status) for file in current_patch.files
+    } == {
+        ("other.txt", FileStatus.DELETED),
+        ("renamed.txt", FileStatus.ADDED),
+    }
+    assert not _run(tmp_path, environment, "git", "diff", "--cached")
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="Git is required for integration tests")
 def test_stage_and_unstage_file_preserves_worktree_changes(tmp_path: Path) -> None:
     environment = _git_environment()

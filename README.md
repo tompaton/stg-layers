@@ -46,7 +46,10 @@ new-patch message template; select **Create** to add an empty patch on top of
 the applied stack, or **Cancel**/Escape to leave the stack unchanged. Press
 **e** on a patch node to edit that patch's StGit-generated message template.
 Create applies the edited message to the selected patch; cancelling leaves it
-unchanged. Press `r` to refresh repository state and `q` to quit.
+unchanged. Press **Ctrl+Down** on a file under **Staged changes** to move its
+staged contents into the current patch. Other staged files are temporarily
+preserved and restored after the refresh; unstaged changes remain in the
+working tree. Press `r` to refresh repository state and `q` to quit.
 Diff additions, removals, and hunk headers are syntax-highlighted.
 Preview line numbers are omitted because they are not source-file line numbers.
 Tree labels use bold section headings and distinct colors for patch statuses,
