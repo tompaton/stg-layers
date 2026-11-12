@@ -10,6 +10,9 @@ from stg_layers.models import DiffHunk, FileChange, FileStatus, Patch, PatchStat
 class FixtureRepository:
     branch: str | None = "feature/read-browser"
 
+    def __init__(self) -> None:
+        self.actions: list[tuple[str, str, int | None]] = []
+
     def _file_change(self, path: str, prefix: str, content: str) -> FileChange:
         hunk = DiffHunk(
             index=0,
@@ -44,6 +47,18 @@ class FixtureRepository:
 
     def load_unstaged_changes(self) -> tuple[FileChange, ...]:
         return (self._file_change("unstaged.py", "old unstaged", "new unstaged"),)
+
+    def stage_file(self, path: str) -> None:
+        self.actions.append(("stage_file", path, None))
+
+    def unstage_file(self, path: str) -> None:
+        self.actions.append(("unstage_file", path, None))
+
+    def stage_hunk(self, path: str, hunk_index: int) -> None:
+        self.actions.append(("stage_hunk", path, hunk_index))
+
+    def unstage_hunk(self, path: str, hunk_index: int) -> None:
+        self.actions.append(("unstage_hunk", path, hunk_index))
 
 
 def test_app_renders_patch_file_hunk_tree() -> None:
@@ -189,6 +204,36 @@ def test_app_shows_empty_staged_and_unstaged_sections() -> None:
             assert "No unstaged changes." in str(tree.root.children[0].children[0].label)
             assert tree.root.children[1].is_expanded
             assert tree.root.children[2].is_expanded
+
+    asyncio.run(run_app())
+
+
+def test_enter_stages_or_unstages_selected_files_and_hunks() -> None:
+    async def run_app() -> None:
+        repository = FixtureRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            unstaged_file = tree.root.children[0].children[0]
+            tree.focus()
+            tree.move_cursor(unstaged_file)
+            await pilot.press("right", "right")
+            assert tree.cursor_node is not None
+            assert tree.cursor_node.data is not None
+            assert tree.cursor_node.data.hunk_index == 0
+            await pilot.press("enter")
+            await pilot.pause()
+
+            staged_file = tree.root.children[1].children[0]
+            tree.move_cursor(staged_file)
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert repository.actions == [
+                ("stage_hunk", "unstaged.py", 0),
+                ("unstage_file", "staged.py", None),
+            ]
 
     asyncio.run(run_app())
 

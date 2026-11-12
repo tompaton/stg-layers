@@ -118,21 +118,22 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 
 - Render the top-level groups and patch sequence in the selected order (newest-first by default, reversible with Shift+R), with patch > file > hunk and file > hunk trees respectively, plus an adjacent diff preview.
 - Use a read-only TextArea for the diff preview, with Tree-sitter highlighting and no misleading sequential line numbers. Support Tab focus between the tree and preview, and scroll the preview with keyboard or mouse.
-- Bind Up/Down to visible-node navigation, Left/Right to collapse/parent and expand/first-child behavior, and make Enter a no-op. Update the preview immediately on node highlighting. Disable horizontal tree overflow so long labels are clipped rather than adding a horizontal scrollbar.
+- Bind Up/Down to visible-node navigation, Left/Right to collapse/parent and expand/first-child behavior, and update the preview immediately on node highlighting. Disable horizontal tree overflow so long labels are clipped rather than adding a horizontal scrollbar.
 - Default to newest-first navigation: unstaged, staged, then patches newest to oldest. Shift+R switches to the existing oldest-first order; keep the order indicator in the status bar.
 - Start with all top-level sections and patches expanded, and file nodes collapsed so hunks are hidden until requested.
 - Apply semantic Rich styles to tree labels: bold section headings; patch labels in `[status patch-id] title` form with `>`, `+`, `-`, or `~` status markers and the whole bracketed ID colored by status; distinct colors for patch ID, file path/status, and hunk header.
 - Add keyboard navigation, expand/collapse, and refresh.
+- Bind Enter on files and hunks under Staged/Unstaged to Git index operations: stage or unstage a whole file, or only the selected hunk. Keep patch-stack nodes read-only and preserve unrelated hunks; use Git's patch-selection commands through the repository adapter rather than shell fragments or a custom patch parser.
 - Manually verify behavior for empty patches, empty staged/unstaged changes, unapplied patches, file renames, binary files, and command errors.
 
-### 5. Design and validate change assignment
+### 5. Design and validate patch assignment
 
 - Prototype changes only in disposable repositories.
 - Determine a supported sequence for assigning an isolated hunk from one layer to another, including moving unassigned work into a layer, while preserving patch order, unrelated hunks, pre-existing index/worktree changes, and stack invariants.
 - Test multiple hunks from one file in different layers, edits to earlier layers, and moving a TODO hunk out of the current layer.
 - Compare explicit hunk staging and destination selection against fixup/autosquash and absorb-based approaches. Record when the mechanism rewrites history, how it handles conflicts, and how the UI can preview and recover from an operation.
-- Add dry-run/preview and recovery behavior before enabling writes.
-- Keep any required lower-level Git mechanics behind the adapter; implement mutation only after integration tests demonstrate the change-level workflow without turning it into commit reordering or requiring manual push/pop or `stg refresh --patch`.
+- Add destination-patch selection, dry-run/preview, and recovery behavior before changing StGit patches.
+- Keep patch-stack mutations behind the adapter; enable them only after integration tests demonstrate the change-level workflow without turning it into commit reordering or requiring manual push/pop or `stg refresh --patch`.
 
 ## Acceptance criteria for the initial release
 
@@ -140,7 +141,7 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 - In an StGit repository, the command defaults to Unstaged changes, Staged changes, then Patch stack with patches newest to oldest. Shift+R reverses to Patch stack oldest to newest, Staged changes, then Unstaged changes. Both modes show patch > file > hunk in the stack and file > hunk under staged and unstaged (including non-ignored untracked files), and preview the selected diff.
 - It gives a clear error for a missing `stg`/`git`, a non-repository directory, or a failed StGit command.
 - Empty staged and unstaged sections are visible when there are no changes in those areas.
-- Browsing and refreshing the view do not modify the index, working tree, or StGit state.
+- Enter stages or unstages the selected working-change file/hunk without changing working-tree contents or the StGit patch stack; unrelated hunks are preserved.
 - pytest, `ty check`, and Ruff linting pass; complexity diagnostics are enabled.
 
 ## Main risks

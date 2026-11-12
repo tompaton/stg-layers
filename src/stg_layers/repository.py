@@ -161,6 +161,7 @@ class StGitRepository:
         executable: str,
         *args: str,
         allowed_returncodes: tuple[int, ...] = (),
+        input_text: str | None = None,
     ) -> str:
         command = (executable, *args)
         try:
@@ -172,6 +173,7 @@ class StGitRepository:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                input=input_text,
             )
         except FileNotFoundError as error:
             raise RepositoryError(f"{executable} was not found on PATH.") from error
@@ -181,6 +183,101 @@ class StGitRepository:
             detail = result.stderr.strip() or result.stdout.strip()
             raise CommandError(command, result.returncode, detail)
         return result.stdout
+
+    def stage_file(self, path: str) -> None:
+        self._run("git", "--literal-pathspecs", "add", "--", path)
+
+    def unstage_file(self, path: str) -> None:
+        self._run("git", "--literal-pathspecs", "restore", "--staged", "--", path)
+
+    def _cached_file_diff(self, path: str) -> str:
+        return self._run(
+            "git",
+            "--literal-pathspecs",
+            "diff",
+            "--cached",
+            "--patch",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--",
+            path,
+        )
+
+    def _is_tracked(self, path: str) -> bool:
+        return bool(
+            self._run(
+                "git",
+                "--literal-pathspecs",
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                path,
+                allowed_returncodes=(1,),
+            ).strip()
+        )
+
+    def _remove_intent_to_add(self, path: str, error: RepositoryError) -> None:
+        try:
+            self._run("git", "--literal-pathspecs", "reset", "--quiet", "--", path)
+        except RepositoryError as cleanup_error:
+            raise RepositoryError(
+                f"{error} Also failed to remove the temporary intent-to-add index "
+                f"entry for {path!r}: {cleanup_error}"
+            ) from cleanup_error
+
+    def stage_hunk(self, path: str, hunk_index: int) -> None:
+        if hunk_index < 0:
+            raise RepositoryError("A hunk index cannot be negative.")
+        is_untracked = not self._is_tracked(path)
+        if is_untracked:
+            self._run("git", "--literal-pathspecs", "add", "--intent-to-add", "--", path)
+
+        selection = "n\n" * hunk_index + "y\nq\n"
+        try:
+            before_diff = self._cached_file_diff(path)
+            self._run(
+                "git",
+                "--literal-pathspecs",
+                "add",
+                "--patch",
+                "--",
+                path,
+                input_text=selection,
+            )
+            after_diff = self._cached_file_diff(path)
+        except RepositoryError as error:
+            if is_untracked:
+                self._remove_intent_to_add(path, error)
+            raise
+
+        if after_diff == before_diff:
+            error = RepositoryError(
+                f"Git did not stage hunk {hunk_index + 1} from {path!r}; the change may be stale."
+            )
+            if is_untracked:
+                self._remove_intent_to_add(path, error)
+            raise error
+
+    def unstage_hunk(self, path: str, hunk_index: int) -> None:
+        if hunk_index < 0:
+            raise RepositoryError("A hunk index cannot be negative.")
+        before_diff = self._cached_file_diff(path)
+        selection = "n\n" * hunk_index + "y\nq\n"
+        self._run(
+            "git",
+            "--literal-pathspecs",
+            "restore",
+            "--staged",
+            "--patch",
+            "--",
+            path,
+            input_text=selection,
+        )
+        if self._cached_file_diff(path) == before_diff:
+            raise RepositoryError(
+                f"Git did not unstage hunk {hunk_index + 1} from {path!r}; the change may be stale."
+            )
 
     def load_stack(self) -> tuple[Patch, ...]:
         series = _parse_series(self._run("stg", "series", "--all", "--description"))

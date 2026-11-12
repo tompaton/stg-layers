@@ -60,6 +60,18 @@ def _create_two_patch_stack(root: Path, environment: dict[str, str]) -> None:
     _run(root, environment, "stg", "refresh", "-m", "Second patch")
 
 
+def _create_git_repository(root: Path, environment: dict[str, str]) -> None:
+    _run(root, environment, "git", "init", "-q")
+    _run(root, environment, "git", "config", "user.name", "Test")
+    _run(root, environment, "git", "config", "user.email", "test@example.invalid")
+    (root / "file.txt").write_text(
+        "".join(f"line {index}\n" for index in range(40)),
+        encoding="utf-8",
+    )
+    _run(root, environment, "git", "add", "--", "file.txt")
+    _run(root, environment, "git", "commit", "-qm", "base")
+
+
 def test_parse_series_records_patch_state_and_description() -> None:
     output = "> current # current patch\n+ earlier # applied patch\n- next # queued patch\n! hidden"
 
@@ -265,6 +277,97 @@ def test_load_staged_and_unstaged_changes_separately(tmp_path: Path) -> None:
     assert "+staged addition" not in unstaged[0].diff_text
     assert unstaged[1].status == FileStatus.ADDED
     assert "+untracked content" in unstaged[1].diff_text
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="Git is required for integration tests")
+def test_stage_and_unstage_file_preserves_worktree_changes(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_git_repository(tmp_path, environment)
+    repository = StGitRepository(tmp_path)
+    path = "file.txt"
+    file_path = tmp_path / path
+    file_path.write_text(
+        file_path.read_text(encoding="utf-8") + "staged change\n",
+        encoding="utf-8",
+    )
+
+    repository.stage_file(path)
+    file_path.write_text(
+        file_path.read_text(encoding="utf-8") + "unstaged change\n",
+        encoding="utf-8",
+    )
+    repository.unstage_file(path)
+
+    assert not _run(tmp_path, environment, "git", "diff", "--cached")
+    worktree_diff = _run(tmp_path, environment, "git", "diff", "--", path)
+    assert "+staged change" in worktree_diff
+    assert "+unstaged change" in worktree_diff
+
+    untracked_path = "new file.txt"
+    (tmp_path / untracked_path).write_text("new content\n", encoding="utf-8")
+    repository.stage_file(untracked_path)
+    assert "+new content" in _run(tmp_path, environment, "git", "diff", "--cached")
+    repository.unstage_file(untracked_path)
+    status = _run(tmp_path, environment, "git", "status", "--short")
+    assert any(line.startswith("?? ") for line in status.splitlines())
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="Git is required for integration tests")
+def test_stage_and_unstage_selected_hunk_preserves_sibling_hunks(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_git_repository(tmp_path, environment)
+    repository = StGitRepository(tmp_path)
+    lines = (tmp_path / "file.txt").read_text(encoding="utf-8").splitlines()
+    lines[15] = "preexisting staged change"
+    (tmp_path / "file.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _run(tmp_path, environment, "git", "add", "--", "file.txt")
+    lines[3] = "first changed"
+    lines[30] = "second changed"
+    (tmp_path / "file.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    repository.stage_hunk("file.txt", 1)
+
+    staged_diff = _run(tmp_path, environment, "git", "diff", "--cached", "--", "file.txt")
+    unstaged_diff = _run(tmp_path, environment, "git", "diff", "--", "file.txt")
+    assert "+preexisting staged change" in staged_diff
+    assert "+second changed" in staged_diff
+    assert "+first changed" not in staged_diff
+    assert "+first changed" in unstaged_diff
+    assert "+second changed" not in unstaged_diff
+
+    repository.unstage_hunk("file.txt", 1)
+
+    remaining_staged_diff = _run(tmp_path, environment, "git", "diff", "--cached", "--", "file.txt")
+    remaining_unstaged_diff = _run(tmp_path, environment, "git", "diff", "--", "file.txt")
+    assert "+preexisting staged change" in remaining_staged_diff
+    assert "+second changed" not in remaining_staged_diff
+    assert "+first changed" in remaining_unstaged_diff
+    assert "+second changed" in remaining_unstaged_diff
+    with pytest.raises(RepositoryError, match="did not stage hunk"):
+        repository.stage_hunk("file.txt", 99)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="Git is required for integration tests")
+def test_stage_and_unstage_untracked_file_hunk(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_git_repository(tmp_path, environment)
+    repository = StGitRepository(tmp_path)
+    untracked_path = "new file.txt"
+    (tmp_path / untracked_path).write_text("new content\n", encoding="utf-8")
+
+    repository.stage_hunk(untracked_path, 0)
+
+    assert "+new content" in _run(tmp_path, environment, "git", "diff", "--cached")
+    repository.unstage_hunk(untracked_path, 0)
+
+    assert not _run(tmp_path, environment, "git", "diff", "--cached")
+    status = _run(tmp_path, environment, "git", "status", "--short")
+    assert any(line.startswith("?? ") for line in status.splitlines())
+    with pytest.raises(RepositoryError, match="did not stage hunk"):
+        repository.stage_hunk(untracked_path, 1)
+    assert not _run(tmp_path, environment, "git", "diff", "--cached")
+    status = _run(tmp_path, environment, "git", "status", "--short")
+    assert any(line.startswith("?? ") for line in status.splitlines())
 
 
 @pytest.mark.skipif(

@@ -57,16 +57,30 @@ class StackReader(Protocol):
 
     def load_unstaged_changes(self) -> tuple[FileChange, ...]: ...
 
+    def stage_file(self, path: str) -> None: ...
+
+    def unstage_file(self, path: str) -> None: ...
+
+    def stage_hunk(self, path: str, hunk_index: int) -> None: ...
+
+    def unstage_hunk(self, path: str, hunk_index: int) -> None: ...
+
 
 class LayerTree(Tree[TreeItem]):
     BINDINGS = [
-        Binding("enter", "noop", show=False),
+        Binding(
+            "enter",
+            "apply_selected_change",
+            "Stage/unstage",
+            show=False,
+            priority=True,
+        ),
         Binding("left", "collapse_or_parent", show=False),
         Binding("right", "expand_or_child", show=False),
     ]
 
-    def action_noop(self) -> None:
-        pass
+    async def action_apply_selected_change(self) -> None:
+        await self.app.run_action("apply_selected_change")
 
     def action_collapse_or_parent(self) -> None:
         node = self.cursor_node
@@ -181,6 +195,42 @@ class StgLayersApp(App[None]):
 
     def action_refresh_stack(self) -> None:
         self.run_worker(self._load_stack(), exclusive=True)
+
+    async def action_apply_selected_change(self) -> None:
+        tree = self.query_one("#patch-tree", LayerTree)
+        node = tree.cursor_node
+        item = node.data if node is not None else None
+        if item is None or item.change_area not in {"staged", "unstaged"} or item.file_path is None:
+            return
+
+        staging = item.change_area == "unstaged"
+        verb = "Staging" if staging else "Unstaging"
+        target = "hunk" if item.hunk_index is not None else "file"
+        self.query_one("#status", Static).update(f"{verb} {target} {item.file_path}...")
+        try:
+            if item.hunk_index is None:
+                if staging:
+                    await asyncio.to_thread(self.repository.stage_file, item.file_path)
+                else:
+                    await asyncio.to_thread(self.repository.unstage_file, item.file_path)
+            else:
+                if staging:
+                    await asyncio.to_thread(
+                        self.repository.stage_hunk,
+                        item.file_path,
+                        item.hunk_index,
+                    )
+                else:
+                    await asyncio.to_thread(
+                        self.repository.unstage_hunk,
+                        item.file_path,
+                        item.hunk_index,
+                    )
+        except RepositoryError as error:
+            self.query_one("#status", Static).update(f"Error: {error}")
+            return
+
+        await self._load_stack()
 
     def action_toggle_order(self) -> None:
         self.newest_first = not self.newest_first
@@ -325,7 +375,7 @@ class StgLayersApp(App[None]):
         else:
             section = patch_name
         label = Text()
-        label.append(display_path)
+        label.append(display_path, style="cyan")
         label.append(f" [{file.status.value}]", style=_FILE_STATUS_STYLES[file.status])
         file_node = parent.add(
             label,
