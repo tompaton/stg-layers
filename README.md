@@ -20,11 +20,13 @@ cd /path/to/stgit-repository
 stg-layers
 ```
 
-The tree contains three top-level sections: **Patch stack**, **Staged changes**,
-and **Unstaged changes**. The patch stack expands to patches > files > hunks;
-the staged and unstaged sections expand to files > hunks. On startup, sections
-and patches are expanded to show their files, while each file's hunks are
-collapsed. Non-ignored untracked files appear as additions in **Unstaged changes**.
+The default tree order shows **Unstaged changes**, **Staged changes**, then
+**Patch stack**, with patches newest to oldest. Press **Shift+R** to reverse the
+order: patches oldest to newest, then staged and unstaged changes. The patch
+stack expands to patches > files > hunks; the staged and unstaged sections
+expand to files > hunks. On startup, sections and patches are expanded to show
+their files, while each file's hunks are collapsed. Non-ignored untracked files
+appear as additions in **Unstaged changes**.
 
 Use **Up/Down** to move between visible nodes. **Right** expands a node or moves
 to its first child; **Left** collapses a node or moves to its parent. The preview

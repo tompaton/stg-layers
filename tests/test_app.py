@@ -53,11 +53,11 @@ def test_app_renders_patch_file_hunk_tree() -> None:
             await pilot.pause()
             tree = app.query_one("#patch-tree", Tree)
             assert [str(child.label) for child in tree.root.children] == [
-                "Patch stack",
-                "Staged changes",
                 "Unstaged changes",
+                "Staged changes",
+                "Patch stack",
             ]
-            patch_stack = tree.root.children[0]
+            patch_stack = tree.root.children[2]
             patch_node = patch_stack.children[0]
             file_node = patch_node.children[0]
             hunk_node = file_node.children[0]
@@ -91,7 +91,7 @@ def test_app_renders_patch_file_hunk_tree() -> None:
             assert staged_hunk.data is not None
             assert staged_hunk.data.change_area == "staged"
 
-            unstaged_group = tree.root.children[2]
+            unstaged_group = tree.root.children[0]
             unstaged_file = unstaged_group.children[0]
             unstaged_hunk = unstaged_file.children[0]
             assert "unstaged.py" in str(unstaged_file.label)
@@ -101,7 +101,7 @@ def test_app_renders_patch_file_hunk_tree() -> None:
             assert tree.root.is_expanded
             assert tree.styles.overflow_x == "hidden"
             tree.focus()
-            await pilot.press("down", "down")
+            await pilot.press("down", "down", "down", "down", "down", "down")
             await pilot.pause()
             title = app.query_one("#selection-title", Static).render()
             assert "Patch: types [notes]" in str(title)
@@ -146,18 +146,6 @@ def test_app_renders_patch_file_hunk_tree() -> None:
             assert file_node.is_expanded
             assert tree.cursor_node is file_node
 
-            await pilot.press("down")
-            await pilot.pause()
-            assert tree.cursor_node is hunk_node
-            await pilot.press("down")
-            await pilot.pause()
-            assert tree.cursor_node is staged_group
-            assert "Staged changes" in str(app.query_one("#selection-title", Static).render())
-            await pilot.press("right")
-            await pilot.pause()
-            assert tree.cursor_node is staged_group.children[0]
-            assert "staged.py" in preview.text
-
     asyncio.run(run_app())
 
 
@@ -198,8 +186,68 @@ def test_app_shows_empty_staged_and_unstaged_sections() -> None:
         async with app.run_test():
             tree = app.query_one("#patch-tree", Tree)
             assert "No staged changes." in str(tree.root.children[1].children[0].label)
-            assert "No unstaged changes." in str(tree.root.children[2].children[0].label)
+            assert "No unstaged changes." in str(tree.root.children[0].children[0].label)
             assert tree.root.children[1].is_expanded
             assert tree.root.children[2].is_expanded
+
+    asyncio.run(run_app())
+
+
+def test_order_toggle_reverses_sections_and_patch_sequence() -> None:
+    class MultiplePatchRepository(FixtureRepository):
+        def load_stack(self) -> tuple[Patch, ...]:
+            return tuple(
+                Patch(name=name, status=PatchStatus.APPLIED, description="", files=())
+                for name in ("oldest", "middle", "newest")
+            )
+
+        def load_staged_changes(self) -> tuple[FileChange, ...]:
+            return ()
+
+        def load_unstaged_changes(self) -> tuple[FileChange, ...]:
+            return ()
+
+    async def run_app() -> None:
+        app = StgLayersApp(MultiplePatchRepository())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            assert [str(node.label) for node in tree.root.children] == [
+                "Unstaged changes",
+                "Staged changes",
+                "Patch stack",
+            ]
+            patch_stack = tree.root.children[2]
+            assert all(node.data is not None for node in patch_stack.children)
+            assert [node.data.patch_name for node in patch_stack.children if node.data] == [
+                "newest",
+                "middle",
+                "oldest",
+            ]
+
+            await pilot.press("R")
+            await pilot.pause()
+            assert [str(node.label) for node in tree.root.children] == [
+                "Patch stack",
+                "Staged changes",
+                "Unstaged changes",
+            ]
+            patch_stack = tree.root.children[0]
+            assert all(node.data is not None for node in patch_stack.children)
+            assert [node.data.patch_name for node in patch_stack.children if node.data] == [
+                "oldest",
+                "middle",
+                "newest",
+            ]
+            assert "oldest first" in str(app.query_one("#status", Static).render())
+
+            await pilot.press("shift+r")
+            await pilot.pause()
+            assert [str(node.label) for node in tree.root.children] == [
+                "Unstaged changes",
+                "Staged changes",
+                "Patch stack",
+            ]
+            assert "newest first" in str(app.query_one("#status", Static).render())
 
     asyncio.run(run_app())

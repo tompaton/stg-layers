@@ -120,6 +120,7 @@ class StgLayersApp(App[None]):
     """
     BINDINGS = [
         Binding("r", "refresh_stack", "Refresh"),
+        Binding("R,shift+r", "toggle_order", "Reverse order", key_display="Shift+R"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -127,6 +128,15 @@ class StgLayersApp(App[None]):
         super().__init__()
         self.repository = repository
         self.sub_title = repository.branch or "detached HEAD"
+        self.newest_first = True
+        self._loaded_data: (
+            tuple[
+                tuple[Patch, ...],
+                tuple[FileChange, ...],
+                tuple[FileChange, ...],
+            ]
+            | None
+        ) = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -166,6 +176,15 @@ class StgLayersApp(App[None]):
     def action_refresh_stack(self) -> None:
         self.run_worker(self._load_stack(), exclusive=True)
 
+    def action_toggle_order(self) -> None:
+        self.newest_first = not self.newest_first
+        if self._loaded_data is not None:
+            self._populate_tree(*self._loaded_data)
+            order = "newest first" if self.newest_first else "oldest first"
+            self.query_one("#status", Static).update(
+                f"Showing {order}. Press R to reverse order; r to refresh."
+            )
+
     @on(Tree.NodeSelected)
     def on_tree_node_selected(self, event: Tree.NodeSelected[TreeItem]) -> None:
         self._show_tree_item(event.node.data)
@@ -193,9 +212,14 @@ class StgLayersApp(App[None]):
         except RepositoryError as error:
             self._show_error(error)
             return
+        self._loaded_data = patches, staged, unstaged
         self._populate_tree(patches, staged, unstaged)
         count = len(patches)
-        status.update(f"Loaded {count} patch{'es' if count != 1 else ''}. Press r to refresh.")
+        order = "newest first" if self.newest_first else "oldest first"
+        status.update(
+            f"Loaded {count} patch{'es' if count != 1 else ''} ({order}). "
+            "Press R to reverse order; r to refresh."
+        )
 
     def _show_error(self, error: RepositoryError) -> None:
         tree = self.query_one("#patch-tree", Tree)
@@ -211,19 +235,28 @@ class StgLayersApp(App[None]):
     ) -> None:
         tree = self.query_one("#patch-tree", Tree)
         tree.root.remove_children()
-        patch_stack = tree.root.add(
-            Text("Patch stack", style="bold cyan"),
-            data=TreeItem(title="Patch stack", diff_text=""),
-            expand=True,
-        )
-        if not patches:
-            patch_stack.add("No patches in this stack.", allow_expand=False)
-        else:
-            for patch in patches:
-                self._add_patch(patch_stack, patch)
+        ordered_patches = tuple(reversed(patches)) if self.newest_first else patches
 
-        self._add_change_group(tree.root, "Staged changes", "staged", staged)
-        self._add_change_group(tree.root, "Unstaged changes", "unstaged", unstaged)
+        def add_patch_stack() -> None:
+            patch_stack = tree.root.add(
+                Text("Patch stack", style="bold cyan"),
+                data=TreeItem(title="Patch stack", diff_text=""),
+                expand=True,
+            )
+            if not ordered_patches:
+                patch_stack.add("No patches in this stack.", allow_expand=False)
+            else:
+                for patch in ordered_patches:
+                    self._add_patch(patch_stack, patch)
+
+        if self.newest_first:
+            self._add_change_group(tree.root, "Unstaged changes", "unstaged", unstaged)
+            self._add_change_group(tree.root, "Staged changes", "staged", staged)
+            add_patch_stack()
+        else:
+            add_patch_stack()
+            self._add_change_group(tree.root, "Staged changes", "staged", staged)
+            self._add_change_group(tree.root, "Unstaged changes", "unstaged", unstaged)
 
     @staticmethod
     def _add_change_group(

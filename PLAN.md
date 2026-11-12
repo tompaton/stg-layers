@@ -45,7 +45,7 @@ The first milestone is a read-only browser for the patch stack and current index
 - Detect the repository and current branch; report missing Git/StGit, invalid repository state, and command failures clearly.
 - Read the patch series and applied/unapplied status using StGit.
 - Read each patch's changed files and unified diff, then use the selected diff library to obtain file and hunk boundaries. Keep patch identity and hunk identity distinct so multiple hunks from one file can belong to different layers.
-- Display a Textual tree with top-level `Patch stack`, `Staged changes`, and `Unstaged changes` groups, in that order. Under the patch stack show patch > file > hunk; under staged and unstaged show file > hunk.
+- Display a Textual tree with a reversible order. Default newest-first order is `Unstaged changes`, `Staged changes`, `Patch stack`, with patches newest to oldest; Shift+R switches to `Patch stack`, `Staged changes`, `Unstaged changes`, with patches oldest to newest. Under the patch stack show patch > file > hunk; under staged and unstaged show file > hunk.
 - Read staged changes with `git diff --cached --patch`. Read unstaged tracked changes with `git diff --patch` and include non-ignored untracked files as additions; parse all diffs with the same library as StGit patch diffs.
 - Show explicit empty states for an empty patch stack and for no staged or unstaged changes.
 - Start with top-level sections, patches, and files expanded so files are visible immediately; keep each file's hunks collapsed until expanded with Right.
@@ -116,9 +116,10 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 
 ### 4. Build the tree browser
 
-- Render top-level Patch stack, Staged changes, and Unstaged changes groups in that order, with patch > file > hunk and file > hunk trees respectively, plus an adjacent diff preview.
+- Render the top-level groups and patch sequence in the selected order (newest-first by default, reversible with Shift+R), with patch > file > hunk and file > hunk trees respectively, plus an adjacent diff preview.
 - Use a read-only TextArea for the diff preview, with Tree-sitter highlighting and no misleading sequential line numbers. Support Tab focus between the tree and preview, and scroll the preview with keyboard or mouse.
 - Bind Up/Down to visible-node navigation, Left/Right to collapse/parent and expand/first-child behavior, and make Enter a no-op. Update the preview immediately on node highlighting. Disable horizontal tree overflow so long labels are clipped rather than adding a horizontal scrollbar.
+- Default to newest-first navigation: unstaged, staged, then patches newest to oldest. Shift+R switches to the existing oldest-first order; keep the order indicator in the status bar.
 - Start with all top-level sections and patches expanded, and file nodes collapsed so hunks are hidden until requested.
 - Apply semantic Rich styles to tree labels: bold section headings; distinct colors for patch status, patch name, file path/status, and hunk header.
 - Add keyboard navigation, expand/collapse, and refresh.
@@ -136,7 +137,7 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 ## Acceptance criteria for the initial release
 
 - `uv tool install .` installs a working command on Python 3.15.
-- In an StGit repository, the command displays top-level Patch stack, Staged changes, and Unstaged changes groups in that order. It shows patch > file > hunk in the stack and file > hunk under staged and unstaged (including non-ignored untracked files), and previews the selected diff.
+- In an StGit repository, the command defaults to Unstaged changes, Staged changes, then Patch stack with patches newest to oldest. Shift+R reverses to Patch stack oldest to newest, Staged changes, then Unstaged changes. Both modes show patch > file > hunk in the stack and file > hunk under staged and unstaged (including non-ignored untracked files), and preview the selected diff.
 - It gives a clear error for a missing `stg`/`git`, a non-repository directory, or a failed StGit command.
 - Empty staged and unstaged sections are visible when there are no changes in those areas.
 - Browsing and refreshing the view do not modify the index, working tree, or StGit state.
