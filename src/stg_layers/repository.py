@@ -211,6 +211,28 @@ class StGitRepository:
                 raise RepositoryError(f"Could not write the patch message: {error}") from error
             self._run("stg", "new", "--file", str(message_path))
 
+    def edit_patch_template(self, patch_name: str) -> str:
+        patch_ref = f"\\{patch_name}" if patch_name.startswith("-") else patch_name
+        with tempfile.TemporaryDirectory(prefix="stg-layers-") as directory:
+            template_path = Path(directory) / "patch-message"
+            self._run("stg", "edit", "--save-template", str(template_path), patch_ref)
+            try:
+                return template_path.read_text(encoding="utf-8")
+            except OSError as error:
+                raise RepositoryError(
+                    f"Could not read StGit's patch message template: {error}"
+                ) from error
+
+    def edit_patch(self, patch_name: str, message: str) -> None:
+        patch_ref = f"\\{patch_name}" if patch_name.startswith("-") else patch_name
+        with tempfile.TemporaryDirectory(prefix="stg-layers-") as directory:
+            message_path = Path(directory) / "patch-message"
+            try:
+                message_path.write_text(message, encoding="utf-8")
+            except OSError as error:
+                raise RepositoryError(f"Could not write the patch message: {error}") from error
+            self._run("stg", "edit", "--file", str(message_path), patch_ref)
+
     def _cached_file_diff(self, path: str) -> str:
         return self._run(
             "git",

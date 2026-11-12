@@ -13,6 +13,7 @@ class FixtureRepository:
     def __init__(self) -> None:
         self.actions: list[tuple[str, str, int | None]] = []
         self.created_messages: list[str] = []
+        self.edited_patches: list[tuple[str, str]] = []
 
     def _file_change(self, path: str, prefix: str, content: str) -> FileChange:
         hunk = DiffHunk(
@@ -66,6 +67,12 @@ class FixtureRepository:
 
     def create_patch(self, message: str) -> None:
         self.created_messages.append(message)
+
+    def edit_patch_template(self, patch_name: str) -> str:
+        return f"Patch: {patch_name}\nAuthor: Test <test@example.invalid>\n\nPatch body\n"
+
+    def edit_patch(self, patch_name: str, message: str) -> None:
+        self.edited_patches.append((patch_name, message))
 
 
 def test_app_renders_patch_file_hunk_tree() -> None:
@@ -282,6 +289,57 @@ def test_create_patch_dialog_can_be_cancelled() -> None:
 
             assert repository.created_messages == []
             assert not list(app.query("#patch-message"))
+            assert "cancelled" in str(app.query_one("#status", Static).render()).lower()
+
+    asyncio.run(run_app())
+
+
+def test_edit_selected_patch_opens_template_and_updates_patch_message() -> None:
+    async def run_app() -> None:
+        repository = FixtureRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            patch_node = tree.root.children[2].children[0]
+            tree.move_cursor(patch_node)
+            await pilot.press("e")
+            await pilot.pause()
+
+            dialog = app.screen
+            message = dialog.query_one("#patch-message", TextArea)
+            assert message.text == repository.edit_patch_template("types [notes]")
+            edited_message = "Patch: types [notes]\n\nEdited patch body\n"
+            message.load_text(edited_message)
+            await pilot.click("#create-patch")
+            await pilot.pause()
+
+            assert repository.edited_patches == [("types [notes]", edited_message)]
+
+    asyncio.run(run_app())
+
+
+def test_edit_patch_is_ignored_when_a_file_is_selected_and_cancel_works() -> None:
+    async def run_app() -> None:
+        repository = FixtureRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            file_node = tree.root.children[2].children[0].children[0]
+            tree.move_cursor(file_node)
+            await pilot.press("e")
+            await pilot.pause()
+            assert app.screen is app.screen_stack[0]
+
+            patch_node = tree.root.children[2].children[0]
+            tree.move_cursor(patch_node)
+            await pilot.press("e")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+
+            assert repository.edited_patches == []
             assert "cancelled" in str(app.query_one("#status", Static).render()).lower()
 
     asyncio.run(run_app())

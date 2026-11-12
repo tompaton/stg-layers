@@ -70,6 +70,10 @@ class StackReader(Protocol):
 
     def create_patch(self, message: str) -> None: ...
 
+    def edit_patch_template(self, patch_name: str) -> str: ...
+
+    def edit_patch(self, patch_name: str, message: str) -> None: ...
+
 
 class PatchMessageDialog(ModalScreen[str | None]):
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
@@ -133,9 +137,13 @@ class LayerTree(Tree[TreeItem]):
             priority=True,
         ),
         Binding("c", "create_patch", "New patch"),
+        Binding("e", "edit_patch", "Edit patch"),
         Binding("left", "collapse_or_parent", show=False),
         Binding("right", "expand_or_child", show=False),
     ]
+
+    async def action_edit_patch(self) -> None:
+        await self.app.run_action("edit_selected_patch")
 
     async def action_create_patch(self) -> None:
         await self.app.run_action("create_patch")
@@ -263,6 +271,41 @@ class StgLayersApp(App[None]):
             return
 
         await self.push_screen(PatchMessageDialog(template), self._on_patch_message)
+
+    async def action_edit_selected_patch(self) -> None:
+        tree = self.query_one("#patch-tree", LayerTree)
+        node = tree.cursor_node
+        item = node.data if node is not None else None
+        if item is None or item.patch_name is None or item.file_path is not None:
+            return
+
+        patch_name = item.patch_name
+        self.query_one("#status", Static).update(f"Preparing to edit patch {patch_name}...")
+        try:
+            template = await asyncio.to_thread(self.repository.edit_patch_template, patch_name)
+        except RepositoryError as error:
+            self.query_one("#status", Static).update(f"Error: {error}")
+            return
+
+        await self.push_screen(
+            PatchMessageDialog(template),
+            lambda message: self._on_edited_patch_message(patch_name, message),
+        )
+
+    def _on_edited_patch_message(self, patch_name: str, message: str | None) -> None:
+        if message is None:
+            self.query_one("#status", Static).update(f"Editing patch {patch_name} cancelled.")
+            return
+        self.run_worker(self._edit_patch(patch_name, message), exclusive=True)
+
+    async def _edit_patch(self, patch_name: str, message: str) -> None:
+        self.query_one("#status", Static).update(f"Updating patch {patch_name}...")
+        try:
+            await asyncio.to_thread(self.repository.edit_patch, patch_name, message)
+        except RepositoryError as error:
+            self.query_one("#status", Static).update(f"Error: {error}")
+            return
+        await self._load_stack()
 
     def _on_patch_message(self, message: str | None) -> None:
         if message is None:

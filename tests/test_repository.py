@@ -274,6 +274,27 @@ def test_create_patch_uses_edited_saved_template_and_creates_empty_top_patch(
     shutil.which("git") is None or shutil.which("stg") is None,
     reason="Git and StGit are required for integration tests",
 )
+def test_edit_older_patch_uses_template_and_preserves_its_diff(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_two_patch_stack(tmp_path, environment)
+    repository = StGitRepository.discover(tmp_path)
+
+    template = repository.edit_patch_template("first")
+    edited_message = template.replace("Patch:  first", "Patch: first-edited", 1)
+    repository.edit_patch("first", edited_message)
+
+    patches = repository.load_stack()
+    assert [patch.name for patch in patches] == ["first-edited", "second"]
+    assert patches[0].status == PatchStatus.APPLIED
+    assert patches[0].files[0].path == "base.txt"
+    assert "+first layer" in patches[0].diff_text
+    assert patches[1].status == PatchStatus.CURRENT
+
+
+@pytest.mark.skipif(
+    shutil.which("git") is None or shutil.which("stg") is None,
+    reason="Git and StGit are required for integration tests",
+)
 def test_load_staged_and_unstaged_changes_separately(tmp_path: Path) -> None:
     environment = _git_environment()
     _create_two_patch_stack(tmp_path, environment)
