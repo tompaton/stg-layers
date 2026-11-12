@@ -51,7 +51,7 @@ The first milestone is a read-only browser for the patch stack and current index
 - Start with top-level sections, patches, and files expanded so files are visible immediately; keep each file's hunks collapsed until expanded with Right.
 - Display the selected patch, staged/unstaged group, file, or hunk diff in a read-only, focusable TextArea with scrolling and Tree-sitter highlighting for additions, removals, and hunk headers. Do not show sequential preview line numbers, which do not correspond to source-file line numbers.
 - Style tree labels so section headings are bold, patch labels use `[status patch-id] title` with `>`, `+`, `-`, or `~` status markers and the whole bracketed ID colored by status, file paths and file statuses are distinguishable, and hunk headers are easy to scan.
-- Up/Down moves between visible nodes; Right expands a collapsed node or moves to the first child; Left collapses an expanded node or moves to its parent. Highlighting a node immediately updates the preview; Enter has no action until a tree action is introduced.
+- Up/Down moves between visible nodes; Right expands a collapsed node or moves to the first child; Left collapses an expanded node or moves to its parent. Highlighting a node immediately updates the preview; Enter acts on files and hunks in the staged and unstaged sections.
 - Tab moves focus between the tree and preview. Hide horizontal overflow in the tree rather than showing a horizontal scrollbar.
 - Provide refresh and useful empty/error states.
 - Do not change the index, working tree, or patch stack in the browser milestone.
@@ -126,8 +126,9 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 - Bind Enter on files and hunks under Staged/Unstaged to Git index operations: stage or unstage a whole file, or only the selected hunk. Keep patch-stack nodes read-only and preserve unrelated hunks; use Git's patch-selection commands through the repository adapter rather than shell fragments or a custom patch parser.
 - Bind `c` in the patch tree to open a message editor initialized with `stg new --save-template`; Create writes the edited template to a temporary file and calls `stg new --file` to add an empty patch at the top of the applied stack. Cancel without changing the stack.
 - Bind `e` on a patch node to open the same editor with `stg edit --save-template <file> <patch>`; Create applies the edited message with `stg edit --file <file> <patch>`. Keep non-patch tree nodes inert and allow any patch in the stack.
-- Bind Ctrl+Down on a file under Staged changes to refresh its staged contents into the current patch with `stg refresh --index`. Because the installed StGit version disallows path arguments with `--index`, temporarily remove other staged file changes from the index and restore them after the refresh; preserve unstaged worktree changes.
-- Bind Ctrl+Up on a file under the current patch to use `stg spill -- <file>` and move the patch change into Staged changes. Preserve unrelated staged files around `stg spill`, which requires a clean index; reject the operation if the selected file itself already has staged changes, and leave its unstaged worktree edits intact.
+- In the default order, bind Ctrl+Down on an unstaged file or hunk to stage it, or on a staged file to refresh its staged contents into the current patch with `stg refresh --index`. In reversed order, Ctrl+Up performs these operations. Because the installed StGit version disallows path arguments with `--index`, temporarily remove other staged file changes from the index and restore them after the refresh; preserve unstaged worktree changes.
+- In the default order, bind Ctrl+Up on a staged file or hunk to unstage it, or on a file under the current patch to use `stg spill -- <file>` and move the patch change into Staged changes. In reversed order, Ctrl+Down performs these operations. Preserve unrelated staged files around `stg spill`, which requires a clean index; reject the operation if the selected file itself already has staged changes, and leave its unstaged worktree edits intact.
+- After Enter moves a file or hunk between staged and unstaged changes, refresh the tree and preview, then select the next file or hunk in the source group. For Ctrl+Up/Ctrl+Down staged/unstaged moves, keep selection on the moved item when it still exists (otherwise its file). Retain the file's expanded state in either case.
 - Manually verify behavior for empty patches, empty staged/unstaged changes, unapplied patches, file renames, binary files, and command errors.
 
 ### 5. Design and validate patch assignment
@@ -145,11 +146,13 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 - In an StGit repository, the command defaults to Unstaged changes, Staged changes, then Patch stack with patches newest to oldest. Shift+R reverses to Patch stack oldest to newest, Staged changes, then Unstaged changes. Both modes show patch > file > hunk in the stack and file > hunk under staged and unstaged (including non-ignored untracked files), and preview the selected diff.
 - It gives a clear error for a missing `stg`/`git`, a non-repository directory, or a failed StGit command.
 - Empty staged and unstaged sections are visible when there are no changes in those areas.
-- Enter stages or unstages the selected working-change file/hunk without changing working-tree contents or the StGit patch stack; unrelated hunks are preserved.
+- Enter stages or unstages the selected working-change file/hunk without changing working-tree contents or the StGit patch stack; unrelated hunks are preserved, and selection advances through the source group after each operation.
+- Ctrl+Down stages an unstaged file or hunk, then moves a staged file into the current patch. Ctrl+Up unstages a staged file or hunk, and spills a current-patch file into the index. The selection follows staged/unstaged moves, the preview refreshes, and expanded-file state is retained.
+- In reversed display order, the Ctrl+Up and Ctrl+Down actions swap to follow visual direction: Ctrl+Up stages/moves toward the patch stack, and Ctrl+Down spills/unstages toward Unstaged changes.
 - `c` in the patch tree opens StGit's generated patch-message template; creating it adds an empty top patch, and cancelling leaves the stack unchanged.
 - `e` on any patch node edits its StGit-generated message; other tree nodes do not trigger patch editing, and cancelling leaves the patch unchanged.
-- Ctrl+Down on a staged file moves its staged contents into the current patch while preserving unrelated staged files and unstaged worktree changes.
-- Ctrl+Up on a current-patch file spills its patch change into the index while preserving unrelated staged files and unstaged worktree changes; other patch files and hunk nodes are not acted on.
+- Ctrl+Down on a staged file moves its staged contents into the current patch while preserving unrelated staged files and unstaged worktree changes; Ctrl+Down on a staged hunk does not move it into a patch.
+- Ctrl+Up on a current-patch file spills its patch change into the index while preserving unrelated staged files and unstaged worktree changes; hunk nodes and files in other patches are not spilled.
 - pytest, `ty check`, and Ruff linting pass; complexity diagnostics are enabled.
 
 ## Main risks

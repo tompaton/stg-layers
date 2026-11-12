@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Sequence
 from typing import Protocol
 
 from rich.style import Style
@@ -144,15 +145,15 @@ class LayerTree(Tree[TreeItem]):
         Binding("e", "edit_patch", "Edit patch"),
         Binding(
             "ctrl+down",
-            "move_staged_file_to_current_patch",
-            "Move staged file to current patch",
+            "move_change_down",
+            "Move change down",
             show=False,
             priority=True,
         ),
         Binding(
             "ctrl+up",
-            "spill_current_patch_file",
-            "Move current-patch file to staged changes",
+            "move_change_up",
+            "Move change up",
             show=False,
             priority=True,
         ),
@@ -160,11 +161,11 @@ class LayerTree(Tree[TreeItem]):
         Binding("right", "expand_or_child", show=False),
     ]
 
-    async def action_move_staged_file_to_current_patch(self) -> None:
-        await self.app.run_action("move_staged_file_to_current_patch")
+    async def action_move_change_down(self) -> None:
+        await self.app.run_action("move_change_down")
 
-    async def action_spill_current_patch_file(self) -> None:
-        await self.app.run_action("spill_current_patch_file")
+    async def action_move_change_up(self) -> None:
+        await self.app.run_action("move_change_up")
 
     async def action_edit_patch(self) -> None:
         await self.app.run_action("edit_selected_patch")
@@ -356,39 +357,18 @@ class StgLayersApp(App[None]):
         if item is None or item.change_area not in {"staged", "unstaged"} or item.file_path is None:
             return
 
-        staging = item.change_area == "unstaged"
-        verb = "Staging" if staging else "Unstaging"
-        target = "hunk" if item.hunk_index is not None else "file"
-        self.query_one("#status", Static).update(f"{verb} {target} {item.file_path}...")
-        try:
-            if item.hunk_index is None:
-                if staging:
-                    await asyncio.to_thread(self.repository.stage_file, item.file_path)
-                else:
-                    await asyncio.to_thread(self.repository.unstage_file, item.file_path)
-            else:
-                if staging:
-                    await asyncio.to_thread(
-                        self.repository.stage_hunk,
-                        item.file_path,
-                        item.hunk_index,
-                    )
-                else:
-                    await asyncio.to_thread(
-                        self.repository.unstage_hunk,
-                        item.file_path,
-                        item.hunk_index,
-                    )
-        except RepositoryError as error:
-            self.query_one("#status", Static).update(f"Error: {error}")
-            return
-
-        await self._load_stack()
+        await self.action_move_file_between_changes(
+            stage=item.change_area == "unstaged",
+            advance=True,
+        )
 
     async def action_move_staged_file_to_current_patch(self) -> None:
         tree = self.query_one("#patch-tree", LayerTree)
         node = tree.cursor_node
         item = node.data if node is not None else None
+        if item is not None and item.change_area == "unstaged":
+            await self.action_move_file_between_changes(stage=True)
+            return
         if (
             item is None
             or item.change_area != "staged"
@@ -408,12 +388,46 @@ class StgLayersApp(App[None]):
         except RepositoryError as error:
             self.query_one("#status", Static).update(f"Error: {error}")
             return
-        await self._load_stack()
+        current_patch = next(
+            (
+                patch
+                for patch in self._loaded_data[0]
+                if patch.status == PatchStatus.CURRENT
+            ),
+            None,
+        ) if self._loaded_data is not None else None
+        if current_patch is None:
+            await self._load_stack()
+            return
+        await self._load_stack(
+            preferred_selection=TreeItem(
+                title="",
+                diff_text="",
+                file_path=item.file_path,
+                patch_name=current_patch.name,
+            ),
+            expansion_fallback_path=item.file_path,
+        )
+
+    async def action_move_change_down(self) -> None:
+        if self.newest_first:
+            await self.action_move_staged_file_to_current_patch()
+        else:
+            await self.action_spill_current_patch_file()
+
+    async def action_move_change_up(self) -> None:
+        if self.newest_first:
+            await self.action_spill_current_patch_file()
+        else:
+            await self.action_move_staged_file_to_current_patch()
 
     async def action_spill_current_patch_file(self) -> None:
         tree = self.query_one("#patch-tree", LayerTree)
         node = tree.cursor_node
         item = node.data if node is not None else None
+        if item is not None and item.change_area == "staged":
+            await self.action_move_file_between_changes(stage=False)
+            return
         if (
             item is None
             or item.patch_name is None
@@ -435,7 +449,165 @@ class StgLayersApp(App[None]):
         except RepositoryError as error:
             self.query_one("#status", Static).update(f"Error: {error}")
             return
-        await self._load_stack()
+        await self._load_stack(
+            preferred_selection=TreeItem(
+                title="",
+                diff_text="",
+                file_path=item.file_path,
+                change_area="staged",
+            ),
+            expansion_fallback_path=item.file_path,
+        )
+
+    async def action_move_file_between_changes(
+        self,
+        *,
+        stage: bool,
+        advance: bool = False,
+    ) -> None:
+        tree = self.query_one("#patch-tree", LayerTree)
+        node = tree.cursor_node
+        item = node.data if node is not None else None
+        expected_area = "unstaged" if stage else "staged"
+        target_area = "staged" if stage else "unstaged"
+        if (
+            item is None
+            or item.change_area != expected_area
+            or item.file_path is None
+        ):
+            return
+
+        next_selection = (
+            self._next_change_selection(node, item)
+            if advance and node is not None
+            else None
+        )
+        verb = "Staging" if stage else "Unstaging"
+        target = "hunk" if item.hunk_index is not None else "file"
+        self.query_one("#status", Static).update(
+            f"{verb} {target} {item.file_path}..."
+        )
+        try:
+            if item.hunk_index is None:
+                operation = self.repository.stage_file if stage else self.repository.unstage_file
+                await asyncio.to_thread(operation, item.file_path)
+            else:
+                operation = self.repository.stage_hunk if stage else self.repository.unstage_hunk
+                await asyncio.to_thread(operation, item.file_path, item.hunk_index)
+        except RepositoryError as error:
+            self.query_one("#status", Static).update(f"Error: {error}")
+            return
+
+        preferred_selection = (
+            next_selection
+            or TreeItem(
+                title=f"{item.change_area.title()} changes",
+                diff_text="",
+                change_area=item.change_area,
+            )
+            if advance
+            else TreeItem(
+                title="",
+                diff_text="",
+                file_path=item.file_path,
+                hunk_index=item.hunk_index,
+                hunk_key=item.hunk_key,
+                change_area=target_area,
+            )
+        )
+        await self._load_stack(
+            preferred_selection=preferred_selection,
+            expansion_fallback_path=item.file_path if not advance else (
+                item.file_path
+                if preferred_selection.file_path == item.file_path
+                else None
+            ),
+        )
+
+    @classmethod
+    def _next_change_selection(
+        cls,
+        node: TreeNode[TreeItem],
+        item: TreeItem,
+    ) -> TreeItem:
+        if item.hunk_index is not None:
+            file_node = node.parent
+            if file_node is not None:
+                next_hunk = cls._next_sibling_item(
+                    node,
+                    tuple(file_node.children),
+                    item.change_area,
+                )
+                if next_hunk is not None:
+                    return next_hunk
+                group_node = file_node.parent
+            else:
+                group_node = None
+        else:
+            file_node = node
+            group_node = node.parent
+
+        if file_node is not None and group_node is not None:
+            siblings = tuple(group_node.children)
+            next_file = cls._next_sibling_file(file_node, siblings)
+            if next_file is not None and next_file.data is not None:
+                return next_file.data
+            previous_file = cls._previous_sibling_file(file_node, siblings)
+            if previous_file is not None and previous_file.data is not None:
+                return previous_file.data
+
+        return TreeItem(
+            title=f"{item.change_area.title()} changes" if item.change_area else "",
+            diff_text="",
+            change_area=item.change_area,
+        )
+
+    @classmethod
+    def _next_sibling_item(
+        cls,
+        node: TreeNode[TreeItem],
+        siblings: Sequence[TreeNode[TreeItem]],
+        change_area: str | None,
+    ) -> TreeItem | None:
+        index = siblings.index(node)
+        for sibling in siblings[index + 1 :]:
+            if sibling.data is not None and sibling.data.change_area == change_area:
+                return sibling.data
+        return None
+
+    @staticmethod
+    def _next_sibling_file(
+        node: TreeNode[TreeItem],
+        siblings: Sequence[TreeNode[TreeItem]],
+    ) -> TreeNode[TreeItem] | None:
+        index = siblings.index(node)
+        return next(
+            (
+                sibling
+                for sibling in siblings[index + 1 :]
+                if sibling.data is not None
+                and sibling.data.file_path is not None
+                and sibling.data.hunk_index is None
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _previous_sibling_file(
+        node: TreeNode[TreeItem],
+        siblings: Sequence[TreeNode[TreeItem]],
+    ) -> TreeNode[TreeItem] | None:
+        index = siblings.index(node)
+        return next(
+            (
+                sibling
+                for sibling in reversed(siblings[:index])
+                if sibling.data is not None
+                and sibling.data.file_path is not None
+                and sibling.data.hunk_index is None
+            ),
+            None,
+        )
 
     def action_toggle_order(self) -> None:
         self.newest_first = not self.newest_first
@@ -461,7 +633,48 @@ class StgLayersApp(App[None]):
         preview = self.query_one("#diff-view", TextArea)
         preview.load_text(item.diff_text or "No text diff available.")
 
-    async def _load_stack(self) -> None:
+    @staticmethod
+    def _tree_item_key(item: TreeItem) -> tuple[str | None, ...]:
+        if (
+            any((item.change_area, item.patch_name, item.file_path))
+            or item.hunk_index is not None
+        ):
+            return (
+                item.change_area,
+                item.patch_name,
+                item.file_path,
+                (
+                    item.hunk_key or str(item.hunk_index)
+                    if item.hunk_index is not None
+                    else None
+                ),
+            )
+        return (item.title,)
+
+    @staticmethod
+    def _hunk_key(diff_text: str) -> str:
+        changed_lines = (
+            line
+            for line in diff_text.splitlines()
+            if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+        )
+        return "\n".join(changed_lines)
+
+    @staticmethod
+    def _tree_nodes(root: TreeNode[TreeItem]) -> list[TreeNode[TreeItem]]:
+        nodes: list[TreeNode[TreeItem]] = []
+        pending = list(root.children)
+        while pending:
+            node = pending.pop()
+            nodes.append(node)
+            pending.extend(node.children)
+        return nodes
+
+    async def _load_stack(
+        self,
+        preferred_selection: TreeItem | None = None,
+        expansion_fallback_path: str | None = None,
+    ) -> None:
         status = self.query_one("#status", Static)
         status.update("Loading patch stack and working changes...")
         try:
@@ -474,7 +687,13 @@ class StgLayersApp(App[None]):
             self._show_error(error)
             return
         self._loaded_data = patches, staged, unstaged
-        self._populate_tree(patches, staged, unstaged)
+        self._populate_tree(
+            patches,
+            staged,
+            unstaged,
+            preferred_selection=preferred_selection,
+            expansion_fallback_path=expansion_fallback_path,
+        )
         count = len(patches)
         order = "newest first" if self.newest_first else "oldest first"
         status.update(
@@ -493,31 +712,187 @@ class StgLayersApp(App[None]):
         patches: tuple[Patch, ...],
         staged: tuple[FileChange, ...],
         unstaged: tuple[FileChange, ...],
+        preferred_selection: TreeItem | None = None,
+        expansion_fallback_path: str | None = None,
     ) -> None:
         tree = self.query_one("#patch-tree", Tree)
+        old_nodes = self._tree_nodes(tree.root)
+        old_cursor = tree.cursor_node
+        previous_selection = old_cursor.data if old_cursor is not None else None
+        selection = preferred_selection or previous_selection
+        expanded_nodes = {
+            self._tree_item_key(node.data): node.is_expanded
+            for node in old_nodes
+            if node.data is not None
+        }
+        fallback_expanded = self._selected_file_expansion(
+            old_cursor,
+            tree.root,
+            expansion_fallback_path,
+        )
+
         tree.root.remove_children()
         ordered_patches = tuple(reversed(patches)) if self.newest_first else patches
-
-        def add_patch_stack() -> None:
-            patch_stack = tree.root.add(
-                Text("Patch stack", style="bold cyan"),
-                data=TreeItem(title="Patch stack", diff_text=""),
-                expand=True,
-            )
-            if not ordered_patches:
-                patch_stack.add("No patches in this stack.", allow_expand=False)
-            else:
-                for patch in ordered_patches:
-                    self._add_patch(patch_stack, patch)
 
         if self.newest_first:
             self._add_change_group(tree.root, "Unstaged changes", "unstaged", unstaged)
             self._add_change_group(tree.root, "Staged changes", "staged", staged)
-            add_patch_stack()
+            self._add_patch_stack(tree.root, ordered_patches)
         else:
-            add_patch_stack()
+            self._add_patch_stack(tree.root, ordered_patches)
             self._add_change_group(tree.root, "Staged changes", "staged", staged)
             self._add_change_group(tree.root, "Unstaged changes", "unstaged", unstaged)
+
+        nodes = self._tree_nodes(tree.root)
+        expansion_states = self._tree_expansion_states(
+            nodes,
+            expanded_nodes,
+            selection,
+            expansion_fallback_path,
+            fallback_expanded,
+        )
+        selected_node = self._find_selection_node(nodes, selection)
+        if selected_node is None and nodes:
+            selected_node = nodes[0]
+        should_restore_selection = (
+            preferred_selection is not None or previous_selection is not None
+        )
+        if selected_node is not None and should_restore_selection:
+            self.call_after_refresh(
+                self._restore_tree_state,
+                tree,
+                selected_node,
+                expansion_states,
+            )
+
+    @staticmethod
+    def _selected_file_expansion(
+        old_cursor: TreeNode[TreeItem] | None,
+        root: TreeNode[TreeItem],
+        file_path: str | None,
+    ) -> bool | None:
+        selected_node = old_cursor
+        while file_path is not None and selected_node is not None and selected_node != root:
+            item = selected_node.data
+            if item is not None and item.file_path == file_path and item.hunk_index is None:
+                return selected_node.is_expanded
+            selected_node = selected_node.parent
+        return None
+
+    @staticmethod
+    def _add_patch_stack(
+        root: TreeNode[TreeItem],
+        patches: tuple[Patch, ...],
+    ) -> None:
+        patch_stack = root.add(
+            Text("Patch stack", style="bold cyan"),
+            data=TreeItem(title="Patch stack", diff_text=""),
+            expand=True,
+        )
+        if not patches:
+            patch_stack.add("No patches in this stack.", allow_expand=False)
+            return
+        for patch in patches:
+            StgLayersApp._add_patch(patch_stack, patch)
+
+    @staticmethod
+    def _matches_expansion_fallback(
+        item: TreeItem,
+        selection: TreeItem | None,
+        file_path: str | None,
+    ) -> bool:
+        return (
+            selection is not None
+            and file_path is not None
+            and item.file_path == file_path
+            and item.hunk_index is None
+            and item.file_path == selection.file_path
+            and (
+                (selection.change_area is not None and item.change_area == selection.change_area)
+                or (selection.patch_name is not None and item.patch_name == selection.patch_name)
+            )
+        )
+
+    @classmethod
+    def _tree_expansion_states(
+        cls,
+        nodes: list[TreeNode[TreeItem]],
+        expanded_nodes: dict[tuple[str | None, ...], bool],
+        selection: TreeItem | None,
+        fallback_path: str | None,
+        fallback_expanded: bool | None,
+    ) -> list[tuple[TreeNode[TreeItem], bool]]:
+        expansion_states: list[tuple[TreeNode[TreeItem], bool]] = []
+        for node in nodes:
+            item = node.data
+            if item is None or not node.allow_expand:
+                continue
+            key = cls._tree_item_key(item)
+            if fallback_expanded is not None and cls._matches_expansion_fallback(
+                item,
+                selection,
+                fallback_path,
+            ):
+                expansion_states.append((node, fallback_expanded))
+            elif key in expanded_nodes:
+                expansion_states.append((node, expanded_nodes[key]))
+        return expansion_states
+
+    @classmethod
+    def _find_selection_node(
+        cls,
+        nodes: list[TreeNode[TreeItem]],
+        selection: TreeItem | None,
+    ) -> TreeNode[TreeItem] | None:
+        if selection is None:
+            return None
+        selection_key = cls._tree_item_key(selection)
+        selected_node = next(
+            (
+                node
+                for node in nodes
+                if node.data is not None and cls._tree_item_key(node.data) == selection_key
+            ),
+            None,
+        )
+        if selected_node is None and selection.hunk_index is not None:
+            return cls._find_file_node(nodes, selection)
+        return selected_node
+
+    @staticmethod
+    def _find_file_node(
+        nodes: list[TreeNode[TreeItem]],
+        selection: TreeItem,
+    ) -> TreeNode[TreeItem] | None:
+        return next(
+            (
+                node
+                for node in nodes
+                if node.data is not None
+                and node.data.file_path == selection.file_path
+                and node.data.change_area == selection.change_area
+                and node.data.patch_name == selection.patch_name
+                and node.data.hunk_index is None
+            ),
+            None,
+        )
+
+    def _restore_tree_state(
+        self,
+        tree: LayerTree,
+        node: TreeNode[TreeItem],
+        expansion_states: list[tuple[TreeNode[TreeItem], bool]],
+    ) -> None:
+        for expanded_node, is_expanded in expansion_states:
+            if is_expanded:
+                expanded_node.expand()
+            else:
+                expanded_node.collapse()
+        self.call_after_refresh(self._restore_tree_selection, tree, node)
+
+    def _restore_tree_selection(self, tree: LayerTree, node: TreeNode[TreeItem]) -> None:
+        tree.move_cursor(node, animate=False)
+        self._show_tree_item(node.data)
 
     @staticmethod
     def _add_change_group(
@@ -603,6 +978,7 @@ class StgLayersApp(App[None]):
                     patch_name=patch_name,
                     file_path=file.path,
                     hunk_index=hunk.index,
+                    hunk_key=StgLayersApp._hunk_key(hunk.diff_text),
                     change_area=change_area,
                 ),
                 allow_expand=False,

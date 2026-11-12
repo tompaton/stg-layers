@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 
 from rich.text import Text
 from textual.widgets import Static, TextArea, Tree
@@ -81,6 +82,99 @@ class FixtureRepository:
 
     def spill_current_patch_file(self, path: str) -> None:
         self.spilled_files.append(path)
+
+
+class MutableFixtureRepository(FixtureRepository):
+    def __init__(
+        self,
+        *,
+        staged: tuple[FileChange, ...] = (),
+        unstaged: tuple[FileChange, ...] = (),
+    ) -> None:
+        super().__init__()
+        self.staged = list(staged)
+        self.unstaged = list(unstaged)
+        self.patch_files = list(super().load_stack()[0].files)
+
+    def load_stack(self) -> tuple[Patch, ...]:
+        patch = super().load_stack()[0]
+        return (replace(patch, files=tuple(self.patch_files)),)
+
+    def load_staged_changes(self) -> tuple[FileChange, ...]:
+        return tuple(self.staged)
+
+    def load_unstaged_changes(self) -> tuple[FileChange, ...]:
+        return tuple(self.unstaged)
+
+    @staticmethod
+    def _file_with_hunks(path: str, hunks: tuple[DiffHunk, ...]) -> FileChange:
+        base = FixtureRepository()._file_change(path, "old", "new")
+        indexed_hunks = tuple(replace(hunk, index=index) for index, hunk in enumerate(hunks))
+        diff_text = f"diff --git a/{path} b/{path}\n"
+        diff_text += "".join(hunk.diff_text for hunk in indexed_hunks)
+        return replace(base, diff_text=diff_text, hunks=indexed_hunks)
+
+    def _move_file(
+        self,
+        source: list[FileChange],
+        target: list[FileChange],
+        path: str,
+    ) -> None:
+        file_index = next(index for index, file in enumerate(source) if file.path == path)
+        target.append(source.pop(file_index))
+
+    def _move_hunk(
+        self,
+        source: list[FileChange],
+        target: list[FileChange],
+        path: str,
+        hunk_index: int,
+    ) -> None:
+        file_index = next(index for index, file in enumerate(source) if file.path == path)
+        source_file = source[file_index]
+        moved_hunk = source_file.hunks[hunk_index]
+        remaining_hunks = tuple(
+            hunk for index, hunk in enumerate(source_file.hunks) if index != hunk_index
+        )
+        if remaining_hunks:
+            source[file_index] = self._file_with_hunks(path, remaining_hunks)
+        else:
+            source.pop(file_index)
+
+        target_index = next(
+            (index for index, file in enumerate(target) if file.path == path),
+            None,
+        )
+        target_hunks = target[target_index].hunks if target_index is not None else ()
+        target_file = self._file_with_hunks(path, (*target_hunks, moved_hunk))
+        if target_index is None:
+            target.append(target_file)
+        else:
+            target[target_index] = target_file
+
+    def stage_file(self, path: str) -> None:
+        super().stage_file(path)
+        self._move_file(self.unstaged, self.staged, path)
+
+    def unstage_file(self, path: str) -> None:
+        super().unstage_file(path)
+        self._move_file(self.staged, self.unstaged, path)
+
+    def stage_hunk(self, path: str, hunk_index: int) -> None:
+        super().stage_hunk(path, hunk_index)
+        self._move_hunk(self.unstaged, self.staged, path, hunk_index)
+
+    def unstage_hunk(self, path: str, hunk_index: int) -> None:
+        super().unstage_hunk(path, hunk_index)
+        self._move_hunk(self.staged, self.unstaged, path, hunk_index)
+
+    def refresh_staged_file_to_current_patch(self, path: str) -> None:
+        super().refresh_staged_file_to_current_patch(path)
+        self._move_file(self.staged, self.patch_files, path)
+
+    def spill_current_patch_file(self, path: str) -> None:
+        super().spill_current_patch_file(path)
+        self._move_file(self.patch_files, self.staged, path)
 
 
 def test_app_renders_patch_file_hunk_tree() -> None:
@@ -230,32 +324,247 @@ def test_app_shows_empty_staged_and_unstaged_sections() -> None:
     asyncio.run(run_app())
 
 
-def test_enter_stages_or_unstages_selected_files_and_hunks() -> None:
+def test_enter_advances_through_files_in_the_source_group() -> None:
     async def run_app() -> None:
-        repository = FixtureRepository()
+        repository = MutableFixtureRepository(
+            unstaged=(
+                FixtureRepository()._file_change("first.py", "old first", "new first"),
+                FixtureRepository()._file_change("second.py", "old second", "new second"),
+            )
+        )
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            first_file = tree.root.children[0].children[0]
+            tree.focus()
+            tree.move_cursor(first_file)
+            await pilot.press("enter")
+            await pilot.pause()
+
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.file_path == "second.py"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert repository.actions == [
+                ("stage_file", "first.py", None),
+                ("stage_file", "second.py", None),
+            ]
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.title == "Unstaged changes"
+
+    asyncio.run(run_app())
+
+
+def test_enter_advances_while_unstaging_files() -> None:
+    async def run_app() -> None:
+        repository = MutableFixtureRepository(
+            staged=(
+                FixtureRepository()._file_change("first.py", "old first", "new first"),
+                FixtureRepository()._file_change("second.py", "old second", "new second"),
+            )
+        )
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            first_file = tree.root.children[1].children[0]
+            tree.move_cursor(first_file)
+            tree.focus()
+            await pilot.press("enter")
+            await pilot.pause()
+
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.file_path == "second.py"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert repository.actions == [
+                ("unstage_file", "first.py", None),
+                ("unstage_file", "second.py", None),
+            ]
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.title == "Staged changes"
+
+    asyncio.run(run_app())
+
+
+def test_staging_hunk_refreshes_preview_and_preserves_expanded_file() -> None:
+    async def run_app() -> None:
+        first_hunk = DiffHunk(
+            index=0,
+            header="@@ -1 +1 @@ first",
+            diff_text="@@ -1 +1 @@ first\n-old first\n+new first\n",
+            source_start=1,
+            source_length=1,
+            target_start=1,
+            target_length=1,
+        )
+        second_hunk = DiffHunk(
+            index=1,
+            header="@@ -10 +10 @@ second",
+            diff_text="@@ -10 +10 @@ second\n-old second\n+new second\n",
+            source_start=10,
+            source_length=1,
+            target_start=10,
+            target_length=1,
+        )
+        change = MutableFixtureRepository._file_with_hunks(
+            "multi.txt",
+            (first_hunk, second_hunk),
+        )
+        repository = MutableFixtureRepository(unstaged=(change,))
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            file_node = tree.root.children[0].children[0]
+            tree.move_cursor(file_node)
+            tree.focus()
+            await pilot.press("right", "right")
+            await pilot.press("enter")
+            await pilot.pause()
+
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.change_area == "unstaged"
+            assert selected.data.hunk_index == 0
+            assert selected.data.hunk_key == StgLayersApp._hunk_key(second_hunk.diff_text)
+            unstaged_file = tree.root.children[0].children[0]
+            assert unstaged_file.is_expanded
+            assert "+new second" in app.query_one("#diff-view", TextArea).text
+            assert "Unstaged changes / multi.txt / hunk 1" in str(
+                app.query_one("#selection-title", Static).render()
+            )
+
+            await pilot.press("enter")
+            await pilot.pause()
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.title == "Unstaged changes"
+            assert repository.actions == [
+                ("stage_hunk", "multi.txt", 0),
+                ("stage_hunk", "multi.txt", 0),
+            ]
+
+    asyncio.run(run_app())
+
+
+def test_ctrl_down_moves_file_from_unstaged_to_staged_then_current_patch() -> None:
+    async def run_app() -> None:
+        change = FixtureRepository()._file_change("moving.py", "old", "new")
+        repository = MutableFixtureRepository(unstaged=(change,))
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.move_cursor(tree.root.children[0].children[0])
+            tree.focus()
+            await pilot.press("ctrl+down")
+            await pilot.pause()
+
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.change_area == "staged"
+            assert selected.data.file_path == "moving.py"
+            await pilot.press("ctrl+down")
+            await pilot.pause()
+
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.patch_name == "types [notes]"
+            assert selected.data.file_path == "moving.py"
+            assert repository.moved_files == ["moving.py"]
+
+    asyncio.run(run_app())
+
+
+def test_ctrl_up_and_down_move_hunks_between_changes_and_follow_selection() -> None:
+    async def run_app() -> None:
+        hunk = DiffHunk(
+            index=0,
+            header="@@ -1 +1 @@",
+            diff_text="@@ -1 +1 @@\n-old\n+new\n",
+            source_start=1,
+            source_length=1,
+            target_start=1,
+            target_length=1,
+        )
+        change = MutableFixtureRepository._file_with_hunks("move.txt", (hunk,))
+        repository = MutableFixtureRepository(unstaged=(change,))
         app = StgLayersApp(repository)
         async with app.run_test() as pilot:
             await pilot.pause()
             tree = app.query_one("#patch-tree", Tree)
             unstaged_file = tree.root.children[0].children[0]
-            tree.focus()
             tree.move_cursor(unstaged_file)
+            tree.focus()
             await pilot.press("right", "right")
-            assert tree.cursor_node is not None
-            assert tree.cursor_node.data is not None
-            assert tree.cursor_node.data.hunk_index == 0
-            await pilot.press("enter")
+            await pilot.press("ctrl+down")
             await pilot.pause()
 
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.change_area == "staged"
+            assert selected.data.file_path == "move.txt"
+            assert selected.data.hunk_index == 0
+            assert "+new" in app.query_one("#diff-view", TextArea).text
+
+            await pilot.press("ctrl+up")
+            await pilot.pause()
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.change_area == "unstaged"
+            assert selected.data.file_path == "move.txt"
+            assert selected.data.hunk_index == 0
+            assert "+new" in app.query_one("#diff-view", TextArea).text
+
+    asyncio.run(run_app())
+
+
+def test_ctrl_shortcuts_follow_reversed_tree_direction() -> None:
+    async def run_app() -> None:
+        moving_file = FixtureRepository()._file_change("moving.py", "old", "new")
+        repository = MutableFixtureRepository(staged=(moving_file,))
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("R")
+            await pilot.pause()
+
+            tree = app.query_one("#patch-tree", Tree)
             staged_file = tree.root.children[1].children[0]
             tree.move_cursor(staged_file)
-            await pilot.press("enter")
+            tree.focus()
+            await pilot.press("ctrl+up")
             await pilot.pause()
 
-            assert repository.actions == [
-                ("stage_hunk", "unstaged.py", 0),
-                ("unstage_file", "staged.py", None),
-            ]
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.patch_name == "types [notes]"
+            assert selected.data.file_path == "moving.py"
+            assert repository.moved_files == ["moving.py"]
+
+            await pilot.press("ctrl+down")
+            await pilot.pause()
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.change_area == "staged"
+            assert selected.data.file_path == "moving.py"
+            assert repository.spilled_files == ["moving.py"]
+
+            await pilot.press("ctrl+down")
+            await pilot.pause()
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.change_area == "unstaged"
+            assert selected.data.file_path == "moving.py"
+            assert repository.actions[-1] == ("unstage_file", "moving.py", None)
 
     asyncio.run(run_app())
 

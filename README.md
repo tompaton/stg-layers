@@ -38,22 +38,32 @@ Horizontal overflow is clipped in the tree to keep its scrollbar out of view.
 
 With the tree focused, **Enter** stages the selected file or hunk under
 **Unstaged changes**, and unstages the selected file or hunk under **Staged
-changes**. Hunk actions preserve other hunks in the same file. File actions
-include untracked files. These operations update Git's index but leave the
-working-tree contents and StGit patch stack unchanged. Patch-stack nodes are
-not modified by Enter. Press **c** while the tree is focused to edit StGit's
+changes**. After Enter, selection advances to the next file or hunk in the
+source group, making repeated presses useful for staging or unstaging a series
+of changes. **Ctrl+Down** also stages an unstaged file or hunk; on a staged file
+it moves that file's staged contents into the current patch. **Ctrl+Up**
+unstages a staged file or hunk; on a current-patch file it spills that file
+into **Staged changes**. With the Ctrl shortcuts, selection follows the moved
+file or hunk. The preview refreshes after all these operations, and expanded
+file state is retained. Hunk actions preserve other hunks in the same file.
+File actions include untracked files. Enter and the staged / unstaged
+shortcuts update Git's index but leave working-tree contents and the patch
+stack unchanged. Patch-stack nodes are not modified by Enter. Press
+**c** while the tree is focused to edit StGit's
 new-patch message template; select **Create** to add an empty patch on top of
 the applied stack, or **Cancel**/Escape to leave the stack unchanged. Press
 **e** on a patch node to edit that patch's StGit-generated message template.
 Create applies the edited message to the selected patch; cancelling leaves it
-unchanged. Press **Ctrl+Down** on a file under **Staged changes** to move its
-staged contents into the current patch. Other staged files are temporarily
-preserved and restored after the refresh; unstaged changes remain in the
-working tree. Press **Ctrl+Up** on a file under the current patch to spill its
-change into **Staged changes**. Other staged files are temporarily preserved;
-if the selected file already has staged changes, unstage those first. Hunks and
-files in other patches are not moved by this shortcut. Press `r` to refresh
-repository state and `q` to quit.
+unchanged. Moving a staged file into the current patch temporarily preserves
+other staged files and leaves unstaged changes in the working tree. Spilling a
+current-patch file temporarily preserves other staged files; if the selected
+file already has staged changes, unstage those first. Hunk-level moves between
+the staged and unstaged sections are supported, but patch moves remain
+file-level. files in other patches are not moved by these shortcuts. In the reversed tree
+order, the Ctrl+Up and Ctrl+Down actions swap to follow the displayed direction:
+Ctrl+Up stages or moves toward the patch stack, while Ctrl+Down spills or
+unstages toward Unstaged changes. Press `r` to refresh repository state and `q`
+to quit.
 Diff additions, removals, and hunk headers are syntax-highlighted.
 Preview line numbers are omitted because they are not source-file line numbers.
 Tree labels use bold section headings and distinct colors for patch statuses,
