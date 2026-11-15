@@ -4,8 +4,9 @@ from dataclasses import replace
 from rich.text import Text
 from textual.widgets import Static, TextArea, Tree
 
-from stg_layers.app import StgLayersApp
+from stg_layers.app import ConflictDialog, StgLayersApp
 from stg_layers.models import DiffHunk, FileChange, FileStatus, Patch, PatchStatus
+from stg_layers.repository import PatchMoveResult, RepositoryError
 
 
 class FixtureRepository:
@@ -17,6 +18,13 @@ class FixtureRepository:
         self.edited_patches: list[tuple[str, str]] = []
         self.moved_files: list[str] = []
         self.spilled_files: list[str] = []
+        self.patch_moves: list[tuple[str, bool]] = []
+        self.undo_count = 0
+        self.conflicted = False
+        self.conflict_on_older_move = False
+
+    def has_conflicts(self) -> bool:
+        return self.conflicted
 
     def _file_change(self, path: str, prefix: str, content: str) -> FileChange:
         hunk = DiffHunk(
@@ -82,6 +90,17 @@ class FixtureRepository:
 
     def spill_current_patch_file(self, path: str) -> None:
         self.spilled_files.append(path)
+
+    def move_patch_one_step(self, patch_name: str, *, toward_newer: bool) -> PatchMoveResult:
+        self.patch_moves.append((patch_name, toward_newer))
+        if self.conflict_on_older_move and not toward_newer:
+            self.conflicted = True
+            raise RepositoryError("Merge conflict")
+        return PatchMoveResult.MOVED
+
+    def undo_stack_reorder(self) -> None:
+        self.undo_count += 1
+        self.conflicted = False
 
 
 class MutableFixtureRepository(FixtureRepository):
@@ -710,6 +729,114 @@ def test_ctrl_up_spills_only_a_current_patch_file() -> None:
             tree.move_cursor(staged_file)
             await pilot.press("ctrl+up")
             assert repository.spilled_files == ["example [typing].py"]
+
+    asyncio.run(run_app())
+
+
+def test_ctrl_up_and_down_move_selected_patch_one_step_in_each_order() -> None:
+    async def run_app() -> None:
+        repository = FixtureRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            patch_node = tree.root.children[2].children[0]
+            tree.move_cursor(patch_node)
+            tree.focus()
+            await pilot.press("ctrl+up")
+            await pilot.pause()
+            await pilot.press("ctrl+down")
+            await pilot.pause()
+
+            assert repository.patch_moves == [
+                ("types [notes]", True),
+                ("types [notes]", False),
+            ]
+
+            await pilot.press("R")
+            await pilot.pause()
+            patch_node = tree.root.children[0].children[0]
+            tree.move_cursor(patch_node)
+            await pilot.press("ctrl+up")
+            await pilot.pause()
+            await pilot.press("ctrl+down")
+            await pilot.pause()
+
+            assert repository.patch_moves == [
+                ("types [notes]", True),
+                ("types [notes]", False),
+                ("types [notes]", False),
+                ("types [notes]", True),
+            ]
+
+    asyncio.run(run_app())
+
+
+def test_conflicting_patch_reorder_offers_undo() -> None:
+    async def run_app() -> None:
+        repository = FixtureRepository()
+        repository.conflict_on_older_move = True
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            patch_node = tree.root.children[2].children[0]
+            tree.move_cursor(patch_node)
+            tree.focus()
+            await pilot.press("ctrl+down")
+            await pilot.pause()
+
+            assert app.screen.query_one("#undo-conflict")
+            await pilot.click("#undo-conflict")
+            await pilot.pause()
+            assert repository.undo_count == 1
+            assert not repository.conflicted
+            assert app.screen is app.screen_stack[0]
+
+    asyncio.run(run_app())
+
+
+def test_repository_conflict_locks_actions_until_refresh() -> None:
+    async def run_app() -> None:
+        repository = FixtureRepository()
+        repository.conflicted = True
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app.screen.query_one("#refresh-conflict")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert repository.actions == []
+
+            repository.conflicted = False
+            await pilot.click("#refresh-conflict")
+            await pilot.pause()
+            assert app.screen is app.screen_stack[0]
+            assert app._loaded_data is not None
+
+    asyncio.run(run_app())
+
+
+def test_repository_conflict_detected_before_mutating_action() -> None:
+    async def run_app() -> None:
+        repository = FixtureRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.move_cursor(tree.root.children[0].children[0])
+            tree.focus()
+            repository.conflicted = True
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert isinstance(app.screen, ConflictDialog)
+            assert app.screen.query_one("#refresh-conflict")
+            assert repository.actions == []
+            repository.conflicted = False
+            await pilot.click("#refresh-conflict")
+            await pilot.pause()
+            assert app.screen is app.screen_stack[0]
 
     asyncio.run(run_app())
 

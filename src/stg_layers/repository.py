@@ -1,6 +1,7 @@
 import codecs
 import subprocess
 import tempfile
+from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
@@ -34,6 +35,12 @@ class CommandError(RepositoryError):
 
 class DiffError(RepositoryError):
     pass
+
+
+class PatchMoveResult(StrEnum):
+    MOVED = "moved"
+    STACK_EDGE = "stack_edge"
+    APPLICATION_BOUNDARY = "application_boundary"
 
 
 def _parse_series(output: str) -> list[tuple[str, PatchStatus, str]]:
@@ -184,6 +191,74 @@ class StGitRepository:
             detail = result.stderr.strip() or result.stdout.strip()
             raise CommandError(command, result.returncode, detail)
         return result.stdout
+
+    def has_conflicts(self) -> bool:
+        return bool(self._run("git", "ls-files", "--unmerged", "-z"))
+
+    def has_local_changes(self) -> bool:
+        return bool(self._run("git", "status", "--porcelain", "--untracked-files=all", "-z"))
+
+    def _ensure_stack_reorder_is_safe(self) -> None:
+        if self.has_conflicts():
+            raise RepositoryError(
+                "Cannot reorder patches while the repository has merge conflicts."
+            )
+        if self.has_local_changes():
+            raise RepositoryError(
+                "Cannot safely reorder patches while there are staged, unstaged, or untracked "
+                "changes. Commit or move those changes first."
+            )
+
+    def move_patch_one_step(
+        self,
+        patch_name: str,
+        *,
+        toward_newer: bool,
+    ) -> PatchMoveResult:
+        self._ensure_stack_reorder_is_safe()
+        series = _parse_series(self._run("stg", "series", "--all"))
+        patch_names = [name for name, _, _ in series]
+        try:
+            patch_index = patch_names.index(patch_name)
+        except ValueError as error:
+            raise RepositoryError(f"Patch {patch_name!r} is not in the StGit stack.") from error
+
+        neighbor_index = patch_index + (1 if toward_newer else -1)
+        if neighbor_index < 0 or neighbor_index >= len(series):
+            return PatchMoveResult.STACK_EDGE
+
+        patch_status = series[patch_index][1]
+        neighbor_status = series[neighbor_index][1]
+        if patch_status in {PatchStatus.APPLIED, PatchStatus.CURRENT} and neighbor_status in {
+            PatchStatus.APPLIED,
+            PatchStatus.CURRENT,
+        }:
+            selected_ref = self._patch_ref(patch_name)
+            neighbor_ref = self._patch_ref(series[neighbor_index][0])
+            position = "--above" if toward_newer else "--below"
+            self._run("stg", "sink", position, neighbor_ref, selected_ref)
+            return PatchMoveResult.MOVED
+
+        if patch_status == PatchStatus.UNAPPLIED and neighbor_status == PatchStatus.UNAPPLIED:
+            start_index = min(patch_index, neighbor_index)
+            reordered_names = patch_names[start_index:]
+            reordered_names[0], reordered_names[1] = reordered_names[1], reordered_names[0]
+            self._run(
+                "stg",
+                "float",
+                "--noapply",
+                *(self._patch_ref(name) for name in reordered_names),
+            )
+            return PatchMoveResult.MOVED
+
+        return PatchMoveResult.APPLICATION_BOUNDARY
+
+    @staticmethod
+    def _patch_ref(patch_name: str) -> str:
+        return f"\\{patch_name}" if patch_name.startswith("-") else patch_name
+
+    def undo_stack_reorder(self) -> None:
+        self._run("stg", "undo", "--hard")
 
     def stage_file(self, path: str) -> None:
         self._run("git", "--literal-pathspecs", "add", "--", path)

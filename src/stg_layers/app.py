@@ -17,7 +17,7 @@ from tree_sitter_diff import HIGHLIGHTS_QUERY
 from tree_sitter_diff import language as diff_language
 
 from stg_layers.models import FileChange, FileStatus, Patch, PatchStatus, TreeItem
-from stg_layers.repository import RepositoryError
+from stg_layers.repository import PatchMoveResult, RepositoryError
 
 _DIFF_THEME = TextAreaTheme(
     name="stg-diff",
@@ -53,6 +53,8 @@ _FILE_STATUS_STYLES = {
 class StackReader(Protocol):
     branch: str | None
 
+    def has_conflicts(self) -> bool: ...
+
     def load_stack(self) -> tuple[Patch, ...]: ...
 
     def load_staged_changes(self) -> tuple[FileChange, ...]: ...
@@ -78,6 +80,15 @@ class StackReader(Protocol):
     def refresh_staged_file_to_current_patch(self, path: str) -> None: ...
 
     def spill_current_patch_file(self, path: str) -> None: ...
+
+    def move_patch_one_step(
+        self,
+        patch_name: str,
+        *,
+        toward_newer: bool,
+    ) -> PatchMoveResult: ...
+
+    def undo_stack_reorder(self) -> None: ...
 
 
 class PatchMessageDialog(ModalScreen[str | None]):
@@ -130,6 +141,80 @@ class PatchMessageDialog(ModalScreen[str | None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class ConflictDialog(ModalScreen[str | None]):
+    BINDINGS = [
+        Binding("escape", "quit", "Quit", show=False),
+        Binding("q", "quit", "Quit", show=False),
+    ]
+    DEFAULT_CSS = """
+    ConflictDialog {
+        align: center middle;
+    }
+
+    #conflict-dialog {
+        width: 72;
+        height: auto;
+        border: round $error;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #conflict-description {
+        height: auto;
+        padding-bottom: 1;
+    }
+
+    #conflict-actions {
+        height: auto;
+        align-horizontal: right;
+    }
+    """
+
+    def __init__(self, *, reorder_failed: bool) -> None:
+        super().__init__()
+        self.reorder_failed = reorder_failed
+
+    def compose(self) -> ComposeResult:
+        if self.reorder_failed:
+            description = (
+                "The patch reorder caused merge conflicts. Undo uses `stg undo --hard` "
+                "to restore the pre-reorder stack and discard the conflicted state. "
+                "Choose Refresh after resolving the conflict in another terminal."
+            )
+        else:
+            description = (
+                "This repository has unresolved merge conflicts. StGit Layers is locked "
+                "until they are resolved in another terminal. Refresh to check again, "
+                "or quit to return to the terminal."
+            )
+        with Vertical(id="conflict-dialog"):
+            yield Static("Repository conflict", classes="error")
+            yield Static(description, id="conflict-description")
+            with Horizontal(id="conflict-actions"):
+                if self.reorder_failed:
+                    yield Button("Undo", id="undo-conflict", variant="warning")
+                yield Button("Quit", id="quit-conflict")
+                yield Button("Refresh", id="refresh-conflict", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#refresh-conflict", Button).focus()
+
+    @on(Button.Pressed, "#undo-conflict")
+    def undo_reorder(self) -> None:
+        self.dismiss("undo")
+
+    @on(Button.Pressed, "#refresh-conflict")
+    def refresh_repository(self) -> None:
+        self.dismiss("refresh")
+
+    @on(Button.Pressed, "#quit-conflict")
+    def quit_to_terminal(self) -> None:
+        self.dismiss("quit")
+
+    def action_quit(self) -> None:
+        self.dismiss("quit")
 
 
 class LayerTree(Tree[TreeItem]):
@@ -243,6 +328,7 @@ class StgLayersApp(App[None]):
         self.repository = repository
         self.sub_title = repository.branch or "detached HEAD"
         self.newest_first = True
+        self._conflict_locked = False
         self._loaded_data: (
             tuple[
                 tuple[Patch, ...],
@@ -288,6 +374,8 @@ class StgLayersApp(App[None]):
         await self._load_stack()
 
     async def action_create_patch(self) -> None:
+        if not await self._ensure_repository_ready():
+            return
         self.query_one("#status", Static).update("Preparing a new patch...")
         try:
             template = await asyncio.to_thread(self.repository.new_patch_template)
@@ -298,6 +386,8 @@ class StgLayersApp(App[None]):
         await self.push_screen(PatchMessageDialog(template), self._on_patch_message)
 
     async def action_edit_selected_patch(self) -> None:
+        if not await self._ensure_repository_ready():
+            return
         tree = self.query_one("#patch-tree", LayerTree)
         node = tree.cursor_node
         item = node.data if node is not None else None
@@ -324,6 +414,8 @@ class StgLayersApp(App[None]):
         self.run_worker(self._edit_patch(patch_name, message), exclusive=True)
 
     async def _edit_patch(self, patch_name: str, message: str) -> None:
+        if not await self._ensure_repository_ready():
+            return
         self.query_one("#status", Static).update(f"Updating patch {patch_name}...")
         try:
             await asyncio.to_thread(self.repository.edit_patch, patch_name, message)
@@ -339,6 +431,8 @@ class StgLayersApp(App[None]):
         self.run_worker(self._create_patch(message), exclusive=True)
 
     async def _create_patch(self, message: str) -> None:
+        if not await self._ensure_repository_ready():
+            return
         self.query_one("#status", Static).update("Creating patch...")
         try:
             await asyncio.to_thread(self.repository.create_patch, message)
@@ -349,6 +443,56 @@ class StgLayersApp(App[None]):
 
     def action_refresh_stack(self) -> None:
         self.run_worker(self._load_stack(), exclusive=True)
+
+    async def _ensure_repository_ready(self) -> bool:
+        if self._conflict_locked:
+            return False
+        try:
+            conflicted = await asyncio.to_thread(self.repository.has_conflicts)
+        except RepositoryError as error:
+            self.query_one("#status", Static).update(f"Error: {error}")
+            return False
+        if conflicted:
+            self._conflict_locked = True
+            await self.push_screen(
+                ConflictDialog(reorder_failed=False),
+                self._on_repository_conflict_resolution,
+            )
+            return False
+        self._conflict_locked = False
+        return True
+
+    def _on_repository_conflict_resolution(self, resolution: str | None) -> None:
+        if resolution != "refresh":
+            self.exit()
+            return
+        self._conflict_locked = False
+        self.run_worker(self._load_stack(), exclusive=True)
+
+    async def _resolve_reorder_conflict(self) -> None:
+        self._conflict_locked = True
+        await self.push_screen(
+            ConflictDialog(reorder_failed=True),
+            self._on_reorder_conflict_resolution,
+        )
+
+    def _on_reorder_conflict_resolution(self, resolution: str | None) -> None:
+        self.run_worker(self._finish_reorder_conflict_resolution(resolution), exclusive=True)
+
+    async def _finish_reorder_conflict_resolution(self, resolution: str | None) -> None:
+        if resolution != "undo" and resolution != "refresh":
+            self.exit()
+            return
+        undo_error: RepositoryError | None = None
+        if resolution == "undo":
+            try:
+                await asyncio.to_thread(self.repository.undo_stack_reorder)
+            except RepositoryError as error:
+                undo_error = error
+        self._conflict_locked = False
+        await self._load_stack()
+        if undo_error is not None:
+            self.query_one("#status", Static).update(f"Undo failed: {undo_error}")
 
     async def action_apply_selected_change(self) -> None:
         tree = self.query_one("#patch-tree", LayerTree)
@@ -375,6 +519,8 @@ class StgLayersApp(App[None]):
             or item.file_path is None
             or item.hunk_index is not None
         ):
+            return
+        if not await self._ensure_repository_ready():
             return
 
         self.query_one("#status", Static).update(
@@ -410,16 +556,79 @@ class StgLayersApp(App[None]):
         )
 
     async def action_move_change_down(self) -> None:
+        if await self._reorder_selected_patch(toward_newer=not self.newest_first):
+            return
         if self.newest_first:
             await self.action_move_staged_file_to_current_patch()
         else:
             await self.action_spill_current_patch_file()
 
     async def action_move_change_up(self) -> None:
+        if await self._reorder_selected_patch(toward_newer=self.newest_first):
+            return
         if self.newest_first:
             await self.action_spill_current_patch_file()
         else:
             await self.action_move_staged_file_to_current_patch()
+
+    async def _reorder_selected_patch(self, *, toward_newer: bool) -> bool:
+        tree = self.query_one("#patch-tree", LayerTree)
+        node = tree.cursor_node
+        item = node.data if node is not None else None
+        if (
+            item is None
+            or item.patch_name is None
+            or item.file_path is not None
+            or item.hunk_index is not None
+        ):
+            return False
+        if not await self._ensure_repository_ready():
+            return True
+
+        direction = "toward newer patches" if toward_newer else "toward older patches"
+        self.query_one("#status", Static).update(
+            f"Moving patch {item.patch_name} one position {direction}..."
+        )
+        try:
+            result = await asyncio.to_thread(
+                self.repository.move_patch_one_step,
+                item.patch_name,
+                toward_newer=toward_newer,
+            )
+        except RepositoryError as error:
+            try:
+                conflicted = await asyncio.to_thread(self.repository.has_conflicts)
+            except RepositoryError as conflict_check_error:
+                self.query_one("#status", Static).update(
+                    f"Error: {error}; could not check for conflicts: {conflict_check_error}"
+                )
+                return True
+            if conflicted:
+                await self._resolve_reorder_conflict()
+            else:
+                self.query_one("#status", Static).update(f"Error: {error}")
+            return True
+
+        if result == PatchMoveResult.STACK_EDGE:
+            position = "top" if toward_newer else "bottom"
+            self.query_one("#status", Static).update(
+                f"Patch {item.patch_name} is already at the {position} of the stack."
+            )
+            return True
+        if result == PatchMoveResult.APPLICATION_BOUNDARY:
+            self.query_one("#status", Static).update(
+                "Patches cannot be reordered across the applied/unapplied boundary."
+            )
+            return True
+
+        await self._load_stack(
+            preferred_selection=TreeItem(
+                title=f"Patch: {item.patch_name}",
+                diff_text="",
+                patch_name=item.patch_name,
+            )
+        )
+        return True
 
     async def action_spill_current_patch_file(self) -> None:
         tree = self.query_one("#patch-tree", LayerTree)
@@ -439,6 +648,8 @@ class StgLayersApp(App[None]):
                 for patch in self._loaded_data[0]
             )
         ):
+            return
+        if not await self._ensure_repository_ready():
             return
 
         self.query_one("#status", Static).update(
@@ -475,6 +686,8 @@ class StgLayersApp(App[None]):
             or item.change_area != expected_area
             or item.file_path is None
         ):
+            return
+        if not await self._ensure_repository_ready():
             return
 
         next_selection = (
@@ -676,8 +889,17 @@ class StgLayersApp(App[None]):
         expansion_fallback_path: str | None = None,
     ) -> None:
         status = self.query_one("#status", Static)
-        status.update("Loading patch stack and working changes...")
         try:
+            if await asyncio.to_thread(self.repository.has_conflicts):
+                self._conflict_locked = True
+                status.update("Merge conflicts detected; repository operations are locked.")
+                await self.push_screen(
+                    ConflictDialog(reorder_failed=False),
+                    self._on_repository_conflict_resolution,
+                )
+                return
+            self._conflict_locked = False
+            status.update("Loading patch stack and working changes...")
             patches, staged, unstaged = await asyncio.gather(
                 asyncio.to_thread(self.repository.load_stack),
                 asyncio.to_thread(self.repository.load_staged_changes),

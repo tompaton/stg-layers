@@ -59,11 +59,24 @@ other staged files and leaves unstaged changes in the working tree. Spilling a
 current-patch file temporarily preserves other staged files; if the selected
 file already has staged changes, unstage those first. Hunk-level moves between
 the staged and unstaged sections are supported, but patch moves remain
-file-level. files in other patches are not moved by these shortcuts. In the reversed tree
-order, the Ctrl+Up and Ctrl+Down actions swap to follow the displayed direction:
-Ctrl+Up stages or moves toward the patch stack, while Ctrl+Down spills or
-unstages toward Unstaged changes. Press `r` to refresh repository state and `q`
-to quit.
+file-level. Files in other patches are not moved by these shortcuts. In the
+reversed tree order, the Ctrl+Up and Ctrl+Down actions swap to follow the
+displayed direction: Ctrl+Up stages or moves toward the patch stack, while
+Ctrl+Down spills or unstages toward Unstaged changes. Press `r` to refresh
+repository state and `q` to quit.
+
+On a patch node, **Ctrl+Up** moves it one position toward newer patches and
+**Ctrl+Down** moves it one position toward older patches; these actions swap in
+reversed order to continue following the displayed direction. At the top or
+bottom, the action does nothing. Patches cannot be moved across the applied /
+unapplied boundary. Reordering requires a clean index and working tree so
+automatic conflict undo cannot discard pre-existing changes. If reordering
+causes a merge conflict, choose **Undo** to run
+`stg undo --hard` and restore the pre-reorder stack, **Quit** to resolve it in
+the terminal, or **Refresh** after resolving it there. When the repository
+already has unresolved index conflicts, StGit Layers is locked behind a
+**Refresh**/**Quit** dialog until they are resolved.
+
 Diff additions, removals, and hunk headers are syntax-highlighted.
 Preview line numbers are omitted because they are not source-file line numbers.
 Tree labels use bold section headings and distinct colors for patch statuses,

@@ -9,6 +9,7 @@ from stg_layers.models import FileStatus, PatchStatus
 from stg_layers.repository import (
     CommandError,
     DiffError,
+    PatchMoveResult,
     RepositoryError,
     StGitRepository,
     _parse_diff,
@@ -49,6 +50,8 @@ def _create_two_patch_stack(root: Path, environment: dict[str, str]) -> None:
     _run(root, environment, "git", "config", "user.email", "test@example.invalid")
     (root / "base.txt").write_text("base\n", encoding="utf-8")
     (root / "other.txt").write_text("other\n", encoding="utf-8")
+    (root / "third.txt").write_text("third\n", encoding="utf-8")
+    (root / "fourth.txt").write_text("fourth\n", encoding="utf-8")
     _run(root, environment, "git", "add", ".")
     _run(root, environment, "git", "commit", "-qm", "base")
     _run(root, environment, "stg", "init")
@@ -58,6 +61,36 @@ def _create_two_patch_stack(root: Path, environment: dict[str, str]) -> None:
     _run(root, environment, "stg", "new", "-m", "Second patch", "second")
     (root / "other.txt").write_text("other\ncurrent layer\n", encoding="utf-8")
     _run(root, environment, "stg", "refresh", "-m", "Second patch")
+
+
+def _create_conflicting_two_patch_stack(root: Path, environment: dict[str, str]) -> None:
+    _run(root, environment, "git", "init", "-q")
+    _run(root, environment, "git", "config", "user.name", "Test")
+    _run(root, environment, "git", "config", "user.email", "test@example.invalid")
+    (root / "conflict.txt").write_text("base\n", encoding="utf-8")
+    _run(root, environment, "git", "add", ".")
+    _run(root, environment, "git", "commit", "-qm", "base")
+    _run(root, environment, "stg", "init")
+    _run(root, environment, "stg", "new", "-m", "First patch", "first")
+    (root / "conflict.txt").write_text("first\n", encoding="utf-8")
+    _run(root, environment, "stg", "refresh", "-m", "First patch")
+    _run(root, environment, "stg", "new", "-m", "Second patch", "second")
+    (root / "conflict.txt").write_text("second\n", encoding="utf-8")
+    _run(root, environment, "stg", "refresh", "-m", "Second patch")
+
+
+def _create_three_patch_stack(root: Path, environment: dict[str, str]) -> None:
+    _create_two_patch_stack(root, environment)
+    _run(root, environment, "stg", "new", "-m", "Third patch", "third")
+    (root / "third.txt").write_text("third\nthird layer\n", encoding="utf-8")
+    _run(root, environment, "stg", "refresh", "-m", "Third patch")
+
+
+def _create_four_patch_stack(root: Path, environment: dict[str, str]) -> None:
+    _create_three_patch_stack(root, environment)
+    _run(root, environment, "stg", "new", "-m", "Fourth patch", "fourth")
+    (root / "fourth.txt").write_text("fourth\nfourth layer\n", encoding="utf-8")
+    _run(root, environment, "stg", "refresh", "-m", "Fourth patch")
 
 
 def _create_git_repository(root: Path, environment: dict[str, str]) -> None:
@@ -81,6 +114,125 @@ def test_parse_series_records_patch_state_and_description() -> None:
         ("next", PatchStatus.UNAPPLIED, "queued patch"),
         ("hidden", PatchStatus.HIDDEN, ""),
     ]
+
+
+def test_move_patch_one_step_reorders_only_the_selected_patch(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_four_patch_stack(tmp_path, environment)
+    repository = StGitRepository(tmp_path)
+
+    result = repository.move_patch_one_step("second", toward_newer=True)
+    assert result == PatchMoveResult.MOVED
+    assert tuple(patch.name for patch in repository.load_stack()) == (
+        "first",
+        "third",
+        "second",
+        "fourth",
+    )
+    result = repository.move_patch_one_step("second", toward_newer=False)
+    assert result == PatchMoveResult.MOVED
+    assert tuple(patch.name for patch in repository.load_stack()) == (
+        "first",
+        "second",
+        "third",
+        "fourth",
+    )
+
+
+def test_unapplied_patch_move_preserves_order_and_application_state(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_four_patch_stack(tmp_path, environment)
+    _run(tmp_path, environment, "stg", "pop", "-n", "2")
+    repository = StGitRepository(tmp_path)
+
+    result = repository.move_patch_one_step("fourth", toward_newer=False)
+
+    assert result == PatchMoveResult.MOVED
+    patches = repository.load_stack()
+    assert tuple(patch.name for patch in patches) == (
+        "first",
+        "second",
+        "fourth",
+        "third",
+    )
+    assert tuple(patch.status for patch in patches) == (
+        PatchStatus.APPLIED,
+        PatchStatus.CURRENT,
+        PatchStatus.UNAPPLIED,
+        PatchStatus.UNAPPLIED,
+    )
+
+
+def test_patch_move_stops_at_stack_and_application_boundaries(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_four_patch_stack(tmp_path, environment)
+    _run(tmp_path, environment, "stg", "pop", "-n", "2")
+    repository = StGitRepository(tmp_path)
+
+    assert repository.move_patch_one_step("first", toward_newer=False) == (
+        PatchMoveResult.STACK_EDGE
+    )
+    assert repository.move_patch_one_step("second", toward_newer=True) == (
+        PatchMoveResult.APPLICATION_BOUNDARY
+    )
+    assert repository.move_patch_one_step("third", toward_newer=False) == (
+        PatchMoveResult.APPLICATION_BOUNDARY
+    )
+
+
+def test_conflicting_sink_can_be_undone_to_the_original_stack(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_conflicting_two_patch_stack(tmp_path, environment)
+    repository = StGitRepository(tmp_path)
+    original_series = _run(tmp_path, environment, "stg", "series", "--all")
+    original_content = (tmp_path / "conflict.txt").read_text(encoding="utf-8")
+    original_head = _run(tmp_path, environment, "git", "rev-parse", "HEAD")
+
+    with pytest.raises(CommandError, match="failed"):
+        repository.move_patch_one_step("second", toward_newer=False)
+
+    assert repository.has_conflicts()
+    assert "UU conflict.txt" in _run(tmp_path, environment, "git", "status", "--short")
+    _run(tmp_path, environment, "git", "add", "conflict.txt")
+    assert not repository.has_conflicts()
+    with pytest.raises(RepositoryError, match="staged, unstaged, or untracked"):
+        repository.move_patch_one_step("second", toward_newer=True)
+    repository.undo_stack_reorder()
+
+    assert not repository.has_conflicts()
+    assert _run(tmp_path, environment, "stg", "series", "--all") == original_series
+    assert (tmp_path / "conflict.txt").read_text(encoding="utf-8") == original_content
+    assert _run(tmp_path, environment, "git", "rev-parse", "HEAD") == original_head
+    assert not _run(tmp_path, environment, "git", "status", "--porcelain")
+
+
+def test_stack_reorder_refuses_dirty_worktree(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_two_patch_stack(tmp_path, environment)
+    repository = StGitRepository(tmp_path)
+    original_series = _run(tmp_path, environment, "stg", "series", "--all")
+    (tmp_path / "local.txt").write_text("uncommitted\n", encoding="utf-8")
+
+    with pytest.raises(RepositoryError, match="staged, unstaged, or untracked"):
+        repository.move_patch_one_step("first", toward_newer=True)
+
+    assert _run(tmp_path, environment, "stg", "series", "--all") == original_series
+    assert (tmp_path / "local.txt").read_text(encoding="utf-8") == "uncommitted\n"
+
+
+@pytest.mark.skipif(
+    shutil.which("git") is None or shutil.which("stg") is None,
+    reason="Git and StGit are required for integration tests",
+)
+def test_staged_changes_with_auto_merge_marker_are_not_conflicts(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_two_patch_stack(tmp_path, environment)
+    repository = StGitRepository(tmp_path)
+    (tmp_path / ".git" / "AUTO_MERGE").write_text("stale merge tree\n", encoding="utf-8")
+    (tmp_path / "dummy-file").write_text("dummy change\n", encoding="utf-8")
+    _run(tmp_path, environment, "git", "add", "--", "dummy-file")
+
+    assert not repository.has_conflicts()
 
 
 def test_parse_series_rejects_unknown_status() -> None:
@@ -361,6 +513,29 @@ def test_refresh_staged_file_moves_only_selected_file_into_current_patch(
     assert "+selected staged" not in staged_diff
     assert "+selected unstaged" in unstaged_diff
     assert "+other staged" not in unstaged_diff
+
+
+@pytest.mark.skipif(
+    shutil.which("git") is None or shutil.which("stg") is None,
+    reason="Git and StGit are required for integration tests",
+)
+def test_refresh_staged_file_into_empty_current_patch(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_two_patch_stack(tmp_path, environment)
+    _run(tmp_path, environment, "stg", "new", "-m", "First empty patch", "empty-first")
+    _run(tmp_path, environment, "stg", "new", "-m", "Second empty patch", "empty-second")
+    repository = StGitRepository.discover(tmp_path)
+    (tmp_path / "dummy-file").write_text("dummy change\n", encoding="utf-8")
+    _run(tmp_path, environment, "git", "add", "--", "dummy-file")
+
+    repository.refresh_staged_file_to_current_patch("dummy-file")
+
+    patches = repository.load_stack()
+    assert patches[-2].name == "empty-first"
+    assert patches[-2].files == ()
+    assert patches[-1].name == "empty-second"
+    assert [file.path for file in patches[-1].files] == ["dummy-file"]
+    assert not _run(tmp_path, environment, "git", "diff", "--cached")
 
 
 @pytest.mark.skipif(

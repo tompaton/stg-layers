@@ -58,8 +58,8 @@ The first milestone is a read-only browser for the patch stack and current index
 
 ### Not in the first release
 
-- Moving files or hunks between patches.
-- Creating, deleting, pushing, popping, refreshing, or reordering patches.
+- Moving files or hunks between arbitrary patches.
+- Deleting patches or manually pushing/popping and refreshing them.
 - Supporting non-StGit Git branches as if they were StGit stacks.
 
 ## Simple design
@@ -129,6 +129,9 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 - In the default order, bind Ctrl+Down on an unstaged file or hunk to stage it, or on a staged file to refresh its staged contents into the current patch with `stg refresh --index`. In reversed order, Ctrl+Up performs these operations. Because the installed StGit version disallows path arguments with `--index`, temporarily remove other staged file changes from the index and restore them after the refresh; preserve unstaged worktree changes.
 - In the default order, bind Ctrl+Up on a staged file or hunk to unstage it, or on a file under the current patch to use `stg spill -- <file>` and move the patch change into Staged changes. In reversed order, Ctrl+Down performs these operations. Preserve unrelated staged files around `stg spill`, which requires a clean index; reject the operation if the selected file itself already has staged changes, and leave its unstaged worktree edits intact.
 - After Enter moves a file or hunk between staged and unstaged changes, refresh the tree and preview, then select the next file or hunk in the source group. For Ctrl+Up/Ctrl+Down staged/unstaged moves, keep selection on the moved item when it still exists (otherwise its file). Retain the file's expanded state in either case.
+- On a patch node, move exactly one position in the selected direction. For applied patches, use `stg sink --above/--below <adjacent patch> <selected patch>`. For unapplied patches, use `stg float --noapply` with an ordered suffix list that swaps only the selected patch and its adjacent neighbor. Do not cross the applied/unapplied boundary; reverse the Ctrl+Up/Ctrl+Down mapping with the displayed patch order.
+- Before patch reordering, require no staged, unstaged, or untracked changes. A conflicted reorder offers `stg undo --hard`, Quit, or Refresh. The clean-tree precondition makes hard undo safe for restoring the pre-operation state; integration-test recovery against the patch order, HEAD, index, and worktree.
+- Before loading or mutating repository state, detect unmerged index entries and lock the UI behind Refresh/Quit. Refresh retries detection and reloads only when conflicts have been resolved externally.
 - Manually verify behavior for empty patches, empty staged/unstaged changes, unapplied patches, file renames, binary files, and command errors.
 
 ### 5. Design and validate patch assignment
@@ -149,10 +152,12 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 - Enter stages or unstages the selected working-change file/hunk without changing working-tree contents or the StGit patch stack; unrelated hunks are preserved, and selection advances through the source group after each operation.
 - Ctrl+Down stages an unstaged file or hunk, then moves a staged file into the current patch. Ctrl+Up unstages a staged file or hunk, and spills a current-patch file into the index. The selection follows staged/unstaged moves, the preview refreshes, and expanded-file state is retained.
 - In reversed display order, the Ctrl+Up and Ctrl+Down actions swap to follow visual direction: Ctrl+Up stages/moves toward the patch stack, and Ctrl+Down spills/unstages toward Unstaged changes.
+- On patch nodes, Ctrl+Up moves one position toward newer patches and Ctrl+Down moves one position toward older patches in newest-first order; those actions reverse in oldest-first order. Stack edges and the applied/unapplied boundary are respected. Reordering refuses a dirty index/worktree. When reorder conflicts occur, Undo restores the original stack without pre-existing local changes, Quit exits to manual terminal recovery, and Refresh reloads after manual resolution.
+- If Git has unmerged index entries, the app performs no repository operations until the user resolves them elsewhere and selects Refresh, or quits to the terminal.
 - `c` in the patch tree opens StGit's generated patch-message template; creating it adds an empty top patch, and cancelling leaves the stack unchanged.
 - `e` on any patch node edits its StGit-generated message; other tree nodes do not trigger patch editing, and cancelling leaves the patch unchanged.
-- Ctrl+Down on a staged file moves its staged contents into the current patch while preserving unrelated staged files and unstaged worktree changes; Ctrl+Down on a staged hunk does not move it into a patch.
-- Ctrl+Up on a current-patch file spills its patch change into the index while preserving unrelated staged files and unstaged worktree changes; hunk nodes and files in other patches are not spilled.
+- Ctrl+Down on a staged file moves its staged contents into the current patch while preserving unrelated staged files and unstaged worktree changes; Ctrl+Down on a staged hunk does not move it into a patch in newest-first order.
+- Ctrl+Up on a current-patch file spills its patch change into the index while preserving unrelated staged files and unstaged worktree changes; hunk nodes and files in other patches are not spilled in newest-first order.
 - pytest, `ty check`, and Ruff linting pass; complexity diagnostics are enabled.
 
 ## Main risks
