@@ -197,7 +197,7 @@ def test_conflicting_sink_can_be_undone_to_the_original_stack(tmp_path: Path) ->
     assert not repository.has_conflicts()
     with pytest.raises(RepositoryError, match="staged, unstaged, or untracked"):
         repository.move_patch_one_step("second", toward_newer=True)
-    repository.undo_stack_reorder()
+    repository.undo_stack_operation()
 
     assert not repository.has_conflicts()
     assert _run(tmp_path, environment, "stg", "series", "--all") == original_series
@@ -218,6 +218,53 @@ def test_stack_reorder_refuses_dirty_worktree(tmp_path: Path) -> None:
 
     assert _run(tmp_path, environment, "stg", "series", "--all") == original_series
     assert (tmp_path / "local.txt").read_text(encoding="utf-8") == "uncommitted\n"
+
+
+@pytest.mark.skipif(
+    shutil.which("git") is None or shutil.which("stg") is None,
+    reason="Git and StGit are required for integration tests",
+)
+def test_push_and_pop_selected_patch(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_four_patch_stack(tmp_path, environment)
+    repository = StGitRepository(tmp_path)
+
+    repository.pop_patch("second")
+
+    patches = repository.load_stack()
+    second = next(patch for patch in patches if patch.name == "second")
+    assert second.status == PatchStatus.UNAPPLIED
+    assert sum(patch.status == PatchStatus.UNAPPLIED for patch in patches) == 1
+
+    repository.push_patch("second")
+
+    patches = repository.load_stack()
+    assert next(patch for patch in patches if patch.name == "second").status in {
+        PatchStatus.APPLIED,
+        PatchStatus.CURRENT,
+    }
+    assert not any(patch.status == PatchStatus.UNAPPLIED for patch in patches)
+
+
+@pytest.mark.skipif(
+    shutil.which("git") is None or shutil.which("stg") is None,
+    reason="Git and StGit are required for integration tests",
+)
+def test_push_can_target_a_later_unapplied_patch(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_four_patch_stack(tmp_path, environment)
+    _run(tmp_path, environment, "stg", "pop", "-n", "2")
+    repository = StGitRepository(tmp_path)
+
+    repository.push_patch("fourth")
+
+    patches = repository.load_stack()
+    assert next(patch for patch in patches if patch.name == "fourth").status == (
+        PatchStatus.CURRENT
+    )
+    assert next(patch for patch in patches if patch.name == "third").status == (
+        PatchStatus.UNAPPLIED
+    )
 
 
 @pytest.mark.skipif(

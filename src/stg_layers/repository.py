@@ -198,14 +198,15 @@ class StGitRepository:
     def has_local_changes(self) -> bool:
         return bool(self._run("git", "status", "--porcelain", "--untracked-files=all", "-z"))
 
-    def _ensure_stack_reorder_is_safe(self) -> None:
+    def _ensure_patch_stack_is_safe(self) -> None:
         if self.has_conflicts():
             raise RepositoryError(
-                "Cannot reorder patches while the repository has merge conflicts."
+                "Cannot modify the patch stack while the repository has merge conflicts."
             )
         if self.has_local_changes():
             raise RepositoryError(
-                "Cannot safely reorder patches while there are staged, unstaged, or untracked "
+                "Cannot safely modify the patch stack while there are staged, unstaged, "
+                "or untracked "
                 "changes. Commit or move those changes first."
             )
 
@@ -215,7 +216,7 @@ class StGitRepository:
         *,
         toward_newer: bool,
     ) -> PatchMoveResult:
-        self._ensure_stack_reorder_is_safe()
+        self._ensure_patch_stack_is_safe()
         series = _parse_series(self._run("stg", "series", "--all"))
         patch_names = [name for name, _, _ in series]
         try:
@@ -253,11 +254,19 @@ class StGitRepository:
 
         return PatchMoveResult.APPLICATION_BOUNDARY
 
+    def push_patch(self, patch_name: str) -> None:
+        self._ensure_patch_stack_is_safe()
+        self._run("stg", "push", self._patch_ref(patch_name))
+
+    def pop_patch(self, patch_name: str) -> None:
+        self._ensure_patch_stack_is_safe()
+        self._run("stg", "pop", self._patch_ref(patch_name))
+
     @staticmethod
     def _patch_ref(patch_name: str) -> str:
         return f"\\{patch_name}" if patch_name.startswith("-") else patch_name
 
-    def undo_stack_reorder(self) -> None:
+    def undo_stack_operation(self) -> None:
         self._run("stg", "undo", "--hard")
 
     def stage_file(self, path: str) -> None:

@@ -19,9 +19,12 @@ class FixtureRepository:
         self.moved_files: list[str] = []
         self.spilled_files: list[str] = []
         self.patch_moves: list[tuple[str, bool]] = []
+        self.patch_pushes: list[str] = []
+        self.patch_pops: list[str] = []
         self.undo_count = 0
         self.conflicted = False
         self.conflict_on_older_move = False
+        self.conflict_on_push = False
 
     def has_conflicts(self) -> bool:
         return self.conflicted
@@ -98,7 +101,16 @@ class FixtureRepository:
             raise RepositoryError("Merge conflict")
         return PatchMoveResult.MOVED
 
-    def undo_stack_reorder(self) -> None:
+    def push_patch(self, patch_name: str) -> None:
+        self.patch_pushes.append(patch_name)
+        if self.conflict_on_push:
+            self.conflicted = True
+            raise RepositoryError("Merge conflict")
+
+    def pop_patch(self, patch_name: str) -> None:
+        self.patch_pops.append(patch_name)
+
+    def undo_stack_operation(self) -> None:
         self.undo_count += 1
         self.conflicted = False
 
@@ -792,6 +804,83 @@ def test_conflicting_patch_reorder_offers_undo() -> None:
             assert repository.undo_count == 1
             assert not repository.conflicted
             assert app.screen is app.screen_stack[0]
+
+    asyncio.run(run_app())
+
+
+def test_push_and_pop_selected_patches_with_p_and_shift_p() -> None:
+    class PatchOperationRepository(FixtureRepository):
+        def load_stack(self) -> tuple[Patch, ...]:
+            return (
+                Patch("older", PatchStatus.APPLIED, "", ()),
+                Patch("current", PatchStatus.CURRENT, "", ()),
+                Patch("queued", PatchStatus.UNAPPLIED, "", ()),
+            )
+
+        def load_staged_changes(self) -> tuple[FileChange, ...]:
+            return ()
+
+        def load_unstaged_changes(self) -> tuple[FileChange, ...]:
+            return ()
+
+    async def run_app() -> None:
+        repository = PatchOperationRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            nodes = {
+                node.data.patch_name: node
+                for node in tree.root.children[2].children
+                if node.data is not None
+            }
+            tree.move_cursor(nodes["queued"])
+            tree.focus()
+            await pilot.press("p")
+            await pilot.pause()
+            assert repository.patch_pushes == ["queued"]
+
+            nodes = {
+                node.data.patch_name: node
+                for node in tree.root.children[2].children
+                if node.data is not None
+            }
+            tree.move_cursor(nodes["current"])
+            await pilot.press("shift+p")
+            await pilot.pause()
+            assert repository.patch_pops == ["current"]
+
+    asyncio.run(run_app())
+
+
+def test_conflicting_patch_push_offers_undo() -> None:
+    class PatchOperationRepository(FixtureRepository):
+        def load_stack(self) -> tuple[Patch, ...]:
+            return (Patch("queued", PatchStatus.UNAPPLIED, "", ()),)
+
+        def load_staged_changes(self) -> tuple[FileChange, ...]:
+            return ()
+
+        def load_unstaged_changes(self) -> tuple[FileChange, ...]:
+            return ()
+
+    async def run_app() -> None:
+        repository = PatchOperationRepository()
+        repository.conflict_on_push = True
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.move_cursor(tree.root.children[2].children[0])
+            tree.focus()
+            await pilot.press("p")
+            await pilot.pause()
+
+            assert app.screen.query_one("#undo-conflict")
+            await pilot.click("#undo-conflict")
+            await pilot.pause()
+            assert repository.undo_count == 1
+            assert not repository.conflicted
 
     asyncio.run(run_app())
 

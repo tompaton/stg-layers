@@ -77,6 +77,14 @@ the terminal, or **Refresh** after resolving it there. When the repository
 already has unresolved index conflicts, StGit Layers is locked behind a
 **Refresh**/**Quit** dialog until they are resolved.
 
+On an unapplied patch node, press **p** to run `stg push <patch>`. On an applied
+or current patch node, press **Shift+P** to run `stg pop <patch>`. StGit applies
+or unapplies the selected patch and may reorder patches as needed. Both
+operations require a clean index and working tree so conflict recovery cannot
+discard pre-existing changes. If pushing or popping causes a conflict, choose
+**Undo** to restore the previous stack, **Quit** to resolve it in the terminal,
+or **Refresh** after resolving it there.
+
 Diff additions, removals, and hunk headers are syntax-highlighted.
 Preview line numbers are omitted because they are not source-file line numbers.
 Tree labels use bold section headings and distinct colors for patch statuses,
