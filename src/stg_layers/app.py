@@ -94,6 +94,17 @@ class StackReader(Protocol):
 
     def undo_stack_operation(self) -> None: ...
 
+    def refresh_stack_operation(self) -> str | None: ...
+
+    @property
+    def stack_operation_pending(self) -> bool: ...
+
+    @property
+    def stack_operation_stash_reference(self) -> str | None: ...
+
+    @property
+    def stash_restore_conflict(self) -> bool: ...
+
 
 class PatchMessageDialog(ModalScreen[str | None]):
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
@@ -176,12 +187,26 @@ class ConflictDialog(ModalScreen[str | None]):
     }
     """
 
-    def __init__(self, *, operation_failed: bool) -> None:
+    def __init__(
+        self,
+        *,
+        operation_failed: bool,
+        stash_reference: str | None = None,
+        stash_restore_conflict: bool = False,
+    ) -> None:
         super().__init__()
         self.operation_failed = operation_failed
+        self.stash_reference = stash_reference
+        self.stash_restore_conflict = stash_restore_conflict
 
     def compose(self) -> ComposeResult:
-        if self.operation_failed:
+        if self.stash_restore_conflict:
+            description = (
+                "Restoring your saved local changes conflicted. Undo rolls back the stack "
+                "operation when applicable and retries restoring those changes. Resolve the "
+                "conflicts in another terminal, then choose Refresh."
+            )
+        elif self.operation_failed:
             description = (
                 "The patch stack operation caused merge conflicts. Undo uses "
                 "`stg undo --hard` to restore the previous stack and discard the conflicted state. "
@@ -192,6 +217,11 @@ class ConflictDialog(ModalScreen[str | None]):
                 "This repository has unresolved merge conflicts. StGit Layers is locked "
                 "until they are resolved in another terminal. Refresh to check again, "
                 "or quit to return to the terminal."
+            )
+        if self.stash_reference is not None:
+            description += (
+                f" Your local changes are safely saved in Git stash "
+                f"{self.stash_reference}; Quit leaves that stash intact."
             )
         with Vertical(id="conflict-dialog"):
             yield Static("Repository conflict", classes="error")
@@ -484,7 +514,11 @@ class StgLayersApp(App[None]):
     async def _resolve_stack_operation_conflict(self) -> None:
         self._conflict_locked = True
         await self.push_screen(
-            ConflictDialog(operation_failed=True),
+            ConflictDialog(
+                operation_failed=True,
+                stash_reference=self.repository.stack_operation_stash_reference,
+                stash_restore_conflict=self.repository.stash_restore_conflict,
+            ),
             self._on_stack_operation_conflict_resolution,
         )
 
@@ -501,16 +535,30 @@ class StgLayersApp(App[None]):
         if resolution != "undo" and resolution != "refresh":
             self.exit()
             return
-        undo_error: RepositoryError | None = None
-        if resolution == "undo":
-            try:
+        try:
+            retained_stash: str | None = None
+            if resolution == "undo":
                 await asyncio.to_thread(self.repository.undo_stack_operation)
-            except RepositoryError as error:
-                undo_error = error
+            else:
+                retained_stash = await asyncio.to_thread(
+                    self.repository.refresh_stack_operation
+                )
+        except RepositoryError as error:
+            self.query_one("#status", Static).update(f"Error: {error}")
+            try:
+                conflicted = await asyncio.to_thread(self.repository.has_conflicts)
+            except RepositoryError:
+                conflicted = False
+            if conflicted or self.repository.stack_operation_pending:
+                await self._resolve_stack_operation_conflict()
+            return
         self._conflict_locked = False
         await self._load_stack()
-        if undo_error is not None:
-            self.query_one("#status", Static).update(f"Undo failed: {undo_error}")
+        if retained_stash is not None:
+            self.query_one("#status", Static).update(
+                "Repository refreshed. Local changes were manually resolved; recovery "
+                f"stash {retained_stash} was retained."
+            )
 
     async def action_push_selected_patch(self) -> None:
         await self._set_selected_patch_application(push=True)
@@ -558,17 +606,7 @@ class StgLayersApp(App[None]):
         try:
             await asyncio.to_thread(operation, item.patch_name)
         except RepositoryError as error:
-            try:
-                conflicted = await asyncio.to_thread(self.repository.has_conflicts)
-            except RepositoryError as conflict_check_error:
-                self.query_one("#status", Static).update(
-                    f"Error: {error}; could not check for conflicts: {conflict_check_error}"
-                )
-                return
-            if conflicted:
-                await self._resolve_stack_operation_conflict()
-            else:
-                self.query_one("#status", Static).update(f"Error: {error}")
+            await self._handle_stack_operation_error(error)
             return
 
         await self._load_stack(
@@ -578,6 +616,19 @@ class StgLayersApp(App[None]):
                 patch_name=item.patch_name,
             )
         )
+
+    async def _handle_stack_operation_error(self, error: RepositoryError) -> None:
+        try:
+            conflicted = await asyncio.to_thread(self.repository.has_conflicts)
+        except RepositoryError as conflict_check_error:
+            self.query_one("#status", Static).update(
+                f"Error: {error}; could not check for conflicts: {conflict_check_error}"
+            )
+            return
+        if conflicted or self.repository.stack_operation_pending:
+            await self._resolve_stack_operation_conflict()
+        else:
+            self.query_one("#status", Static).update(f"Error: {error}")
 
     async def action_apply_selected_change(self) -> None:
         tree = self.query_one("#patch-tree", LayerTree)
@@ -681,17 +732,7 @@ class StgLayersApp(App[None]):
                 toward_newer=toward_newer,
             )
         except RepositoryError as error:
-            try:
-                conflicted = await asyncio.to_thread(self.repository.has_conflicts)
-            except RepositoryError as conflict_check_error:
-                self.query_one("#status", Static).update(
-                    f"Error: {error}; could not check for conflicts: {conflict_check_error}"
-                )
-                return True
-            if conflicted:
-                await self._resolve_stack_operation_conflict()
-            else:
-                self.query_one("#status", Static).update(f"Error: {error}")
+            await self._handle_stack_operation_error(error)
             return True
 
         if result == PatchMoveResult.STACK_EDGE:

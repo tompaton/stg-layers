@@ -195,7 +195,7 @@ def test_conflicting_sink_can_be_undone_to_the_original_stack(tmp_path: Path) ->
     assert "UU conflict.txt" in _run(tmp_path, environment, "git", "status", "--short")
     _run(tmp_path, environment, "git", "add", "conflict.txt")
     assert not repository.has_conflicts()
-    with pytest.raises(RepositoryError, match="staged, unstaged, or untracked"):
+    with pytest.raises(RepositoryError, match="awaiting Undo or Refresh"):
         repository.move_patch_one_step("second", toward_newer=True)
     repository.undo_stack_operation()
 
@@ -206,18 +206,20 @@ def test_conflicting_sink_can_be_undone_to_the_original_stack(tmp_path: Path) ->
     assert not _run(tmp_path, environment, "git", "status", "--porcelain")
 
 
-def test_stack_reorder_refuses_dirty_worktree(tmp_path: Path) -> None:
+def test_stack_reorder_preserves_untracked_changes(tmp_path: Path) -> None:
     environment = _git_environment()
     _create_two_patch_stack(tmp_path, environment)
     repository = StGitRepository(tmp_path)
-    original_series = _run(tmp_path, environment, "stg", "series", "--all")
     (tmp_path / "local.txt").write_text("uncommitted\n", encoding="utf-8")
 
-    with pytest.raises(RepositoryError, match="staged, unstaged, or untracked"):
-        repository.move_patch_one_step("first", toward_newer=True)
+    assert repository.move_patch_one_step("first", toward_newer=True) == (
+        PatchMoveResult.MOVED
+    )
 
-    assert _run(tmp_path, environment, "stg", "series", "--all") == original_series
+    patches = repository.load_stack()
+    assert [patch.name for patch in patches] == ["second", "first"]
     assert (tmp_path / "local.txt").read_text(encoding="utf-8") == "uncommitted\n"
+    assert not _run(tmp_path, environment, "git", "stash", "list")
 
 
 @pytest.mark.skipif(
@@ -265,6 +267,138 @@ def test_push_can_target_a_later_unapplied_patch(tmp_path: Path) -> None:
     assert next(patch for patch in patches if patch.name == "third").status == (
         PatchStatus.UNAPPLIED
     )
+
+
+@pytest.mark.skipif(
+    shutil.which("git") is None or shutil.which("stg") is None,
+    reason="Git and StGit are required for integration tests",
+)
+def test_push_and_pop_preserve_staged_unstaged_and_untracked_changes(
+    tmp_path: Path,
+) -> None:
+    environment = _git_environment()
+    _create_two_patch_stack(tmp_path, environment)
+    repository = StGitRepository(tmp_path)
+
+    base_file = tmp_path / "base.txt"
+    base_file.write_text(
+        base_file.read_text(encoding="utf-8") + "staged change\n",
+        encoding="utf-8",
+    )
+    _run(tmp_path, environment, "git", "add", "--", "base.txt")
+    base_file.write_text(
+        base_file.read_text(encoding="utf-8") + "unstaged change\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "local-untracked.txt").write_text("untracked change\n", encoding="utf-8")
+
+    repository.pop_patch("second")
+    repository.push_patch("second")
+
+    staged_diff = _run(tmp_path, environment, "git", "diff", "--cached", "--", "base.txt")
+    unstaged_diff = _run(tmp_path, environment, "git", "diff", "--", "base.txt")
+    assert "+staged change" in staged_diff
+    assert "+unstaged change" not in staged_diff
+    assert "+unstaged change" in unstaged_diff
+    assert "+staged change" not in unstaged_diff
+    assert (tmp_path / "local-untracked.txt").read_text(encoding="utf-8") == (
+        "untracked change\n"
+    )
+    assert not _run(tmp_path, environment, "git", "stash", "list")
+
+
+@pytest.mark.skipif(
+    shutil.which("git") is None or shutil.which("stg") is None,
+    reason="Git and StGit are required for integration tests",
+)
+def test_undo_conflicted_stack_operation_restores_stashed_changes(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_conflicting_two_patch_stack(tmp_path, environment)
+    repository = StGitRepository(tmp_path)
+    original_series = _run(tmp_path, environment, "stg", "series", "--all")
+    (tmp_path / "local-untracked.txt").write_text("preserved\n", encoding="utf-8")
+
+    with pytest.raises(CommandError, match="failed"):
+        repository.move_patch_one_step("second", toward_newer=False)
+
+    stash_commit = repository.stack_operation_stash_reference
+    assert stash_commit is not None
+    assert repository.stack_operation_pending
+    repository.undo_stack_operation()
+
+    assert not repository.stack_operation_pending
+    assert (tmp_path / "local-untracked.txt").read_text(encoding="utf-8") == "preserved\n"
+    assert not _run(tmp_path, environment, "git", "stash", "list")
+    assert _run(tmp_path, environment, "stg", "series", "--all") == original_series
+    assert _run(tmp_path, environment, "git", "status", "--porcelain") == (
+        "?? local-untracked.txt\n"
+    )
+
+
+@pytest.mark.skipif(
+    shutil.which("git") is None or shutil.which("stg") is None,
+    reason="Git and StGit are required for integration tests",
+)
+def test_refresh_conflicted_stack_operation_restores_stash_after_manual_resolution(
+    tmp_path: Path,
+) -> None:
+    environment = _git_environment()
+    _create_conflicting_two_patch_stack(tmp_path, environment)
+    repository = StGitRepository(tmp_path)
+    (tmp_path / "local-untracked.txt").write_text("preserved\n", encoding="utf-8")
+
+    with pytest.raises(CommandError, match="failed"):
+        repository.move_patch_one_step("second", toward_newer=False)
+
+    stash_commit = repository.stack_operation_stash_reference
+    assert stash_commit is not None
+    (tmp_path / "conflict.txt").write_text("manually resolved\n", encoding="utf-8")
+    _run(tmp_path, environment, "git", "add", "conflict.txt")
+
+    assert repository.refresh_stack_operation() is None
+
+    assert not repository.stack_operation_pending
+    assert (tmp_path / "local-untracked.txt").read_text(encoding="utf-8") == "preserved\n"
+    assert not _run(tmp_path, environment, "git", "stash", "list")
+
+
+@pytest.mark.skipif(
+    shutil.which("git") is None or shutil.which("stg") is None,
+    reason="Git and StGit are required for integration tests",
+)
+def test_undo_stash_restore_conflict_reverts_stack_and_restores_index(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _run(tmp_path, environment, "git", "init", "-q")
+    _run(tmp_path, environment, "git", "config", "user.name", "Test")
+    _run(tmp_path, environment, "git", "config", "user.email", "test@example.invalid")
+    (tmp_path / "file.txt").write_text("base\n", encoding="utf-8")
+    _run(tmp_path, environment, "git", "add", "file.txt")
+    _run(tmp_path, environment, "git", "commit", "-qm", "base")
+    _run(tmp_path, environment, "stg", "init")
+    _run(tmp_path, environment, "stg", "new", "-m", "Patch", "patch")
+    (tmp_path / "file.txt").write_text("base\npatch\n", encoding="utf-8")
+    _run(tmp_path, environment, "stg", "refresh", "-m", "Patch")
+    _run(tmp_path, environment, "stg", "pop")
+    (tmp_path / "file.txt").write_text("base\nuser\n", encoding="utf-8")
+    _run(tmp_path, environment, "git", "add", "file.txt")
+    repository = StGitRepository(tmp_path)
+
+    with pytest.raises(RepositoryError, match="restoring saved local changes failed"):
+        repository.push_patch("patch")
+
+    assert repository.stash_restore_conflict
+    assert repository.stack_operation_pending
+    assert repository.stack_operation_stash_reference is not None
+    assert not repository.has_conflicts()
+    repository.undo_stack_operation()
+
+    assert not repository.stack_operation_pending
+    assert next(patch for patch in repository.load_stack() if patch.name == "patch").status == (
+        PatchStatus.UNAPPLIED
+    )
+    assert (tmp_path / "file.txt").read_text(encoding="utf-8") == "base\nuser\n"
+    assert "+user" in _run(tmp_path, environment, "git", "diff", "--cached")
+    assert not _run(tmp_path, environment, "git", "stash", "list")
 
 
 @pytest.mark.skipif(

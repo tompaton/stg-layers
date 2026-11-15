@@ -25,6 +25,8 @@ class FixtureRepository:
         self.conflicted = False
         self.conflict_on_older_move = False
         self.conflict_on_push = False
+        self.pending_stash_reference: str | None = None
+        self.restore_stash_conflict = False
 
     def has_conflicts(self) -> bool:
         return self.conflicted
@@ -113,6 +115,27 @@ class FixtureRepository:
     def undo_stack_operation(self) -> None:
         self.undo_count += 1
         self.conflicted = False
+        self.pending_stash_reference = None
+        self.restore_stash_conflict = False
+
+    def refresh_stack_operation(self) -> str | None:
+        retained = self.pending_stash_reference if self.restore_stash_conflict else None
+        self.conflicted = False
+        self.pending_stash_reference = None
+        self.restore_stash_conflict = False
+        return retained
+
+    @property
+    def stack_operation_pending(self) -> bool:
+        return self.conflicted or self.pending_stash_reference is not None
+
+    @property
+    def stack_operation_stash_reference(self) -> str | None:
+        return self.pending_stash_reference
+
+    @property
+    def stash_restore_conflict(self) -> bool:
+        return self.restore_stash_conflict
 
 
 class MutableFixtureRepository(FixtureRepository):
@@ -804,6 +827,51 @@ def test_conflicting_patch_reorder_offers_undo() -> None:
             assert repository.undo_count == 1
             assert not repository.conflicted
             assert app.screen is app.screen_stack[0]
+
+    asyncio.run(run_app())
+
+
+def test_stash_restore_conflict_refresh_retains_recovery_stash() -> None:
+    class PatchOperationRepository(FixtureRepository):
+        def load_stack(self) -> tuple[Patch, ...]:
+            return (Patch("queued", PatchStatus.UNAPPLIED, "", ()),)
+
+        def load_staged_changes(self) -> tuple[FileChange, ...]:
+            return ()
+
+        def load_unstaged_changes(self) -> tuple[FileChange, ...]:
+            return ()
+
+        def push_patch(self, patch_name: str) -> None:
+            super().push_patch(patch_name)
+            self.conflicted = False
+            self.pending_stash_reference = "stash-commit"
+            self.restore_stash_conflict = True
+            raise RepositoryError("Stash restoration conflict")
+
+    async def run_app() -> None:
+        repository = PatchOperationRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.move_cursor(tree.root.children[2].children[0])
+            tree.focus()
+            await pilot.press("p")
+            await pilot.pause()
+
+            dialog = app.screen
+            assert isinstance(dialog, ConflictDialog)
+            description = str(dialog.query_one("#conflict-description", Static).render())
+            assert "stash-commit" in description
+            await pilot.click("#refresh-conflict")
+            await pilot.pause()
+
+            assert app.screen is app.screen_stack[0]
+            assert "stash-commit was retained" in str(
+                app.query_one("#status", Static).render()
+            )
+            assert not repository.stack_operation_pending
 
     asyncio.run(run_app())
 

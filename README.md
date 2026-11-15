@@ -69,21 +69,23 @@ On a patch node, **Ctrl+Up** moves it one position toward newer patches and
 **Ctrl+Down** moves it one position toward older patches; these actions swap in
 reversed order to continue following the displayed direction. At the top or
 bottom, the action does nothing. Patches cannot be moved across the applied /
-unapplied boundary. Reordering requires a clean index and working tree so
-automatic conflict undo cannot discard pre-existing changes. If reordering
-causes a merge conflict, choose **Undo** to run
-`stg undo --hard` and restore the pre-reorder stack, **Quit** to resolve it in
-the terminal, or **Refresh** after resolving it there. When the repository
-already has unresolved index conflicts, StGit Layers is locked behind a
-**Refresh**/**Quit** dialog until they are resolved.
+unapplied boundary. Before reordering, StGit Layers stashes staged, unstaged,
+and untracked changes, then restores them with their staged state after the
+operation. The stash is removed only after restoration succeeds. If reordering
+or restoring the changes causes a conflict, choose **Undo** to run
+`stg undo --hard`, restore the prior stack, and retry restoring the stash;
+**Quit** to resolve it in the terminal (the stash is retained); or **Refresh**
+after resolving it there. If a stash-restore conflict is resolved manually,
+the stash is retained as a backup. When the repository already has unresolved
+index conflicts, StGit Layers is locked behind a **Refresh**/**Quit** dialog
+until they are resolved.
 
 On an unapplied patch node, press **p** to run `stg push <patch>`. On an applied
 or current patch node, press **Shift+P** to run `stg pop <patch>`. StGit applies
-or unapplies the selected patch and may reorder patches as needed. Both
-operations require a clean index and working tree so conflict recovery cannot
-discard pre-existing changes. If pushing or popping causes a conflict, choose
-**Undo** to restore the previous stack, **Quit** to resolve it in the terminal,
-or **Refresh** after resolving it there.
+or unapplies the selected patch and may reorder patches as needed. Staged,
+unstaged, and untracked changes are stashed and restored with the staged state
+preserved. If pushing, popping, or restoring the changes causes a conflict,
+the same Undo/Quit/Refresh recovery applies.
 
 Diff additions, removals, and hunk headers are syntax-highlighted.
 Preview line numbers are omitted because they are not source-file line numbers.

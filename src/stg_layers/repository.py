@@ -138,6 +138,10 @@ class StGitRepository:
     def __init__(self, root: Path, branch: str | None = None) -> None:
         self.root = root
         self.branch = branch
+        self._pending_stack_operation = False
+        self._pending_stack_stash: str | None = None
+        self._pending_stash_restore_conflict = False
+        self._pending_stack_undo_needed = False
 
     @classmethod
     def discover(cls, cwd: Path) -> StGitRepository:
@@ -199,16 +203,173 @@ class StGitRepository:
         return bool(self._run("git", "status", "--porcelain", "--untracked-files=all", "-z"))
 
     def _ensure_patch_stack_is_safe(self) -> None:
+        if self._pending_stack_operation:
+            raise RepositoryError(
+                "Cannot modify the patch stack while a previous stack operation is awaiting "
+                "Undo or Refresh."
+            )
         if self.has_conflicts():
             raise RepositoryError(
                 "Cannot modify the patch stack while the repository has merge conflicts."
             )
-        if self.has_local_changes():
+
+    @property
+    def stack_operation_pending(self) -> bool:
+        return self._pending_stack_operation
+
+    @property
+    def stack_operation_stash_reference(self) -> str | None:
+        return self._pending_stack_stash
+
+    @property
+    def stash_restore_conflict(self) -> bool:
+        return self._pending_stash_restore_conflict
+
+    def _stash_current_changes(self) -> str | None:
+        if not self.has_local_changes():
+            return None
+
+        old_stash = self._run(
+            "git",
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "refs/stash",
+            allowed_returncodes=(1,),
+        ).strip()
+        self._run(
+            "git",
+            "stash",
+            "push",
+            "--include-untracked",
+            "--message",
+            "stg-layers stack operation",
+        )
+        new_stash = self._run(
+            "git",
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "refs/stash",
+            allowed_returncodes=(1,),
+        ).strip()
+        if not new_stash or new_stash == old_stash:
             raise RepositoryError(
-                "Cannot safely modify the patch stack while there are staged, unstaged, "
-                "or untracked "
-                "changes. Commit or move those changes first."
+                "Git did not create a stash for the local changes; the stack operation was "
+                "not run."
             )
+        if self.has_local_changes():
+            try:
+                self._restore_stash(new_stash)
+            except RepositoryError as restore_error:
+                self._pending_stack_operation = True
+                self._pending_stack_stash = new_stash
+                self._pending_stash_restore_conflict = True
+                raise RepositoryError(
+                    f"Git created stash {new_stash}, but local changes remain and could not be "
+                    f"restored: {restore_error}"
+                ) from restore_error
+            raise RepositoryError(
+                f"Git created stash {new_stash}, but local changes remain. "
+                "The stack operation was not run."
+            )
+        return new_stash
+
+    def _drop_stash(self, stash_commit: str) -> None:
+        stash_entries = self._run(
+            "git",
+            "stash",
+            "list",
+            "--format=%gd%x00%H",
+        )
+        for entry in stash_entries.splitlines():
+            fields = entry.split("\0")
+            if len(fields) == 2 and fields[1] == stash_commit:
+                self._run("git", "stash", "drop", fields[0])
+                return
+        raise RepositoryError(
+            f"Local changes were restored, but their saved stash {stash_commit} could not "
+            "be found to remove. The stash was left untouched."
+        )
+
+    def _restore_stash(self, stash_commit: str) -> None:
+        try:
+            self._run("git", "stash", "apply", "--index", stash_commit)
+        except RepositoryError:
+            self._pending_stack_stash = stash_commit
+            self._pending_stash_restore_conflict = True
+            raise
+        self._pending_stack_stash = None
+        self._pending_stash_restore_conflict = False
+        try:
+            self._drop_stash(stash_commit)
+        except RepositoryError as error:
+            raise RepositoryError(
+                f"Local changes were restored, but the recovery stash {stash_commit} remains "
+                "in the stash list."
+            ) from error
+
+    def _run_stack_operation(self, *args: str) -> str:
+        self._ensure_patch_stack_is_safe()
+        stash_commit = self._stash_current_changes()
+        try:
+            output = self._run("stg", *args)
+        except RepositoryError as error:
+            self._recover_failed_stack_command(error, stash_commit)
+            raise
+
+        self._pending_stack_undo_needed = True
+        if stash_commit is not None:
+            self._restore_stash_after_stack_command(stash_commit)
+        self._pending_stack_operation = False
+        self._pending_stack_stash = None
+        self._pending_stash_restore_conflict = False
+        self._pending_stack_undo_needed = False
+        return output
+
+    def _recover_failed_stack_command(
+        self,
+        operation_error: RepositoryError,
+        stash_commit: str | None,
+    ) -> None:
+        if self.has_conflicts():
+            self._pending_stack_operation = True
+            self._pending_stack_stash = stash_commit
+            self._pending_stash_restore_conflict = False
+            self._pending_stack_undo_needed = True
+            return
+        if stash_commit is None:
+            self._pending_stack_undo_needed = False
+            return
+        try:
+            self._restore_stash(stash_commit)
+        except RepositoryError as restore_error:
+            if self._pending_stack_stash is None:
+                self._pending_stack_operation = False
+                self._pending_stack_undo_needed = False
+                raise restore_error from operation_error
+            self._pending_stack_operation = True
+            self._pending_stash_restore_conflict = True
+            self._pending_stack_undo_needed = False
+            raise RepositoryError(
+                f"The stack operation failed, and restoring saved local changes also failed: "
+                f"{restore_error}"
+            ) from operation_error
+
+    def _restore_stash_after_stack_command(self, stash_commit: str) -> None:
+        try:
+            self._restore_stash(stash_commit)
+        except RepositoryError as error:
+            if self._pending_stack_stash is None:
+                self._pending_stack_operation = False
+                self._pending_stack_undo_needed = False
+                raise
+            self._pending_stack_operation = True
+            self._pending_stash_restore_conflict = True
+            raise RepositoryError(
+                f"The stack operation completed, but restoring saved local changes failed: "
+                f"{error}"
+            ) from error
 
     def move_patch_one_step(
         self,
@@ -237,15 +398,14 @@ class StGitRepository:
             selected_ref = self._patch_ref(patch_name)
             neighbor_ref = self._patch_ref(series[neighbor_index][0])
             position = "--above" if toward_newer else "--below"
-            self._run("stg", "sink", position, neighbor_ref, selected_ref)
+            self._run_stack_operation("sink", position, neighbor_ref, selected_ref)
             return PatchMoveResult.MOVED
 
         if patch_status == PatchStatus.UNAPPLIED and neighbor_status == PatchStatus.UNAPPLIED:
             start_index = min(patch_index, neighbor_index)
             reordered_names = patch_names[start_index:]
             reordered_names[0], reordered_names[1] = reordered_names[1], reordered_names[0]
-            self._run(
-                "stg",
+            self._run_stack_operation(
                 "float",
                 "--noapply",
                 *(self._patch_ref(name) for name in reordered_names),
@@ -255,19 +415,61 @@ class StGitRepository:
         return PatchMoveResult.APPLICATION_BOUNDARY
 
     def push_patch(self, patch_name: str) -> None:
-        self._ensure_patch_stack_is_safe()
-        self._run("stg", "push", self._patch_ref(patch_name))
+        self._run_stack_operation("push", self._patch_ref(patch_name))
 
     def pop_patch(self, patch_name: str) -> None:
-        self._ensure_patch_stack_is_safe()
-        self._run("stg", "pop", self._patch_ref(patch_name))
+        self._run_stack_operation("pop", self._patch_ref(patch_name))
 
     @staticmethod
     def _patch_ref(patch_name: str) -> str:
         return f"\\{patch_name}" if patch_name.startswith("-") else patch_name
 
     def undo_stack_operation(self) -> None:
-        self._run("stg", "undo", "--hard")
+        if self._pending_stack_undo_needed:
+            self._run("stg", "undo", "--hard")
+        if self._pending_stack_stash is not None:
+            stash_commit = self._pending_stack_stash
+            try:
+                self._restore_stash(stash_commit)
+            except RepositoryError:
+                if self._pending_stack_stash is None:
+                    self._pending_stack_operation = False
+                    raise
+                self._pending_stack_operation = True
+                self._pending_stash_restore_conflict = True
+                raise
+        self._pending_stack_operation = False
+        self._pending_stack_stash = None
+        self._pending_stash_restore_conflict = False
+        self._pending_stack_undo_needed = False
+
+    def refresh_stack_operation(self) -> str | None:
+        if self.has_conflicts():
+            raise RepositoryError(
+                "Resolve merge conflicts in the repository before refreshing."
+            )
+        if self._pending_stack_stash is None:
+            self._pending_stack_operation = False
+            self._pending_stash_restore_conflict = False
+            self._pending_stack_undo_needed = False
+            return None
+
+        stash_commit = self._pending_stack_stash
+        if self._pending_stash_restore_conflict:
+            self._pending_stack_stash = None
+            self._pending_stash_restore_conflict = False
+            self._pending_stack_operation = False
+            self._pending_stack_undo_needed = False
+            return stash_commit
+
+        try:
+            self._restore_stash(stash_commit)
+        except RepositoryError:
+            self._pending_stash_restore_conflict = True
+            raise
+        self._pending_stack_operation = False
+        self._pending_stack_undo_needed = False
+        return None
 
     def stage_file(self, path: str) -> None:
         self._run("git", "--literal-pathspecs", "add", "--", path)
