@@ -18,7 +18,8 @@ For unified-diff parsing, use an existing library instead of implementing a pars
 
 - The initial read-only Textual browser is implemented. It uses `stg series` for patch state, `stg show` for patch diffs, `git diff --cached --patch` for staged changes, `git diff --patch` plus no-index diffs for non-ignored untracked files, and `unidiff` for file/hunk parsing. On the tested StGit version, `stg show` must receive `--diff-opt=--patch` to produce unified diffs.
 - In a disposable stack, staging a worktree hunk and running `stg refresh --index --patch <earlier-applied-patch>` moved that hunk into the earlier patch while leaving a separate unstaged worktree hunk unchanged. The integration test simulates the UI's selection with `git add -p`; the application does not invoke Git's interactive prompt.
-- StGit documents that refreshing a non-top patch creates and merges a temporary patch and may conflict. The successful prototype covers assigning a staged, uncommitted hunk to an earlier applied patch; it does not yet solve relocating a hunk already committed in one patch to another. Keep the application read-only until those behaviors have a safe, tested interaction.
+- Adjacent file/hunk transfers between applied patches are implemented. The adapter temporarily pops patches above the source, spills the change, removes or reapplies the selected diff through Git's index, refreshes the current patch, then restores the affected patches. It stashes staged, unstaged, and untracked work once for the full transaction and tracks StGit undo steps for rollback.
+- Integration tests cover whole-file moves in both directions, isolated hunks with sibling hunks retained in the source, binary files, later patches, local staged/unstaged/untracked work, applied/unapplied boundaries, and both automatic rollback and conflict recovery. StGit `refresh` creates two undo records in the tested version, so transaction rollback accounts for both.
 
 ## Goal
 
@@ -38,7 +39,7 @@ Repository
         └── hunk
 ```
 
-The first milestone is a read-only browser for the patch stack and current index/worktree changes. The model and adapter should support a subsequent change-level workflow: inspect the current changes, select a file or hunk, and assign it to another patch without making push/pop or `stg refresh --patch` the user's manual workflow. The design must not assume that one file belongs to one patch or that each patch's contents are already an indivisible, finalized unit.
+The application visualizes the patch stack and current index/worktree changes, and supports assigning a file or hunk to an adjacent applied patch without making manual push/pop or `stg refresh --patch` the user's workflow. The design does not assume that one file belongs to one patch or that each patch's contents are an indivisible, finalized unit.
 
 ## Initial scope
 
@@ -56,9 +57,9 @@ The first milestone is a read-only browser for the patch stack and current index
 - Provide refresh and useful empty/error states.
 - Do not change the index, working tree, or patch stack in the browser milestone.
 
-### Not in the first release
+### Current boundaries
 
-- Moving files or hunks between arbitrary patches.
+- Moving files or hunks to non-adjacent patches or across the applied/unapplied boundary.
 - Deleting patches or manually pushing/popping and refreshing them.
 - Supporting non-StGit Git branches as if they were StGit stacks.
 
@@ -134,14 +135,13 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 - Before loading or mutating repository state, detect unmerged index entries and lock the UI behind Refresh/Quit. Refresh retries detection and reloads only when conflicts have been resolved externally.
 - Manually verify behavior for empty patches, empty staged/unstaged changes, unapplied patches, file renames, binary files, and command errors.
 
-### 5. Design and validate patch assignment
+### 5. Implement adjacent patch assignment
 
-- Prototype changes only in disposable repositories.
-- Determine a supported sequence for assigning an isolated hunk from one layer to another, including moving unassigned work into a layer, while preserving patch order, unrelated hunks, pre-existing index/worktree changes, and stack invariants.
-- Test multiple hunks from one file in different layers, edits to earlier layers, and moving a TODO hunk out of the current layer.
-- Compare explicit hunk staging and destination selection against fixup/autosquash and absorb-based approaches. Record when the mechanism rewrites history, how it handles conflicts, and how the UI can preview and recover from an operation.
-- Add destination-patch selection, dry-run/preview, and recovery behavior before changing StGit patches.
-- Keep patch-stack mutations behind the adapter; enable them only after integration tests demonstrate the change-level workflow without turning it into commit reordering or requiring manual push/pop or `stg refresh --patch`.
+- Implement file and isolated-hunk transfers between adjacent applied patches through the repository adapter. Moves are limited to applied neighbors and do not cross the applied/unapplied boundary.
+- Use StGit stack operations and Git's cached patch application to preserve unselected hunks. When needed, pop patches above the source, refresh the source, refresh the destination as current, and restore the popped patches.
+- Stash staged, unstaged, and untracked local changes for the whole transaction; restore their staged split after success. Automatically undo completed steps on non-conflict failures, and use the existing Undo/Quit/Refresh recovery for conflicts.
+- Preserve selection and expanded-file state after a move, reversing Ctrl+Up/Ctrl+Down with the tree order. Keep current-patch file spilling to Staged changes when moving toward a newer patch is not possible.
+- Defer non-adjacent destinations, unapplied-patch transfers, dry-run previews, and any operation that edits StGit's internal metadata directly.
 
 ## Acceptance criteria for the initial release
 
@@ -153,6 +153,7 @@ Keep reading and mutation as separate adapter responsibilities. Before enabling 
 - Ctrl+Down stages an unstaged file or hunk, then moves a staged file into the current patch. Ctrl+Up unstages a staged file or hunk, and spills a current-patch file into the index. The selection follows staged/unstaged moves, the preview refreshes, and expanded-file state is retained.
 - In reversed display order, the Ctrl+Up and Ctrl+Down actions swap to follow visual direction: Ctrl+Up stages/moves toward the patch stack, and Ctrl+Down spills/unstages toward Unstaged changes.
 - On patch nodes, Ctrl+Up moves one position toward newer patches and Ctrl+Down moves one position toward older patches in newest-first order; those actions reverse in oldest-first order. Stack edges and the applied/unapplied boundary are respected. Reordering stashes and restores pre-existing local changes, preserving staged state. When stack-operation conflicts occur, Undo restores the original stack and local changes, Quit exits to manual terminal recovery with the stash retained, and Refresh retries/restores changes after manual resolution.
+- On a file or hunk in an applied patch, Ctrl+Up/Down moves it to the adjacent applied patch in the visual direction; reversing the tree reverses the key direction. A file moves as a whole, while a hunk move preserves sibling hunks. Selection follows the moved file/hunk, and the applied/unapplied boundary is not crossed.
 - On an unapplied patch, `p` runs `stg push <patch>`; on an applied/current patch, Shift+P runs `stg pop <patch>`. Push and pop stash and restore local changes, preserving staged state, and use the same Undo/Quit/Refresh conflict recovery.
 - If Git has unmerged index entries, the app performs no repository operations until the user resolves them elsewhere and selects Refresh, or quits to the terminal.
 - `c` in the patch tree opens StGit's generated patch-message template; creating it adds an empty top patch, and cancelling leaves the stack unchanged.

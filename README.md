@@ -58,12 +58,11 @@ unchanged. Moving a staged file into the current patch temporarily preserves
 other staged files and leaves unstaged changes in the working tree. Spilling a
 current-patch file temporarily preserves other staged files; if the selected
 file already has staged changes, unstage those first. Hunk-level moves between
-the staged and unstaged sections are supported, but patch moves remain
-file-level. Files in other patches are not moved by these shortcuts. In the
-reversed tree order, the Ctrl+Up and Ctrl+Down actions swap to follow the
-displayed direction: Ctrl+Up stages or moves toward the patch stack, while
-Ctrl+Down spills or unstages toward Unstaged changes. Press `r` to refresh
-repository state and `q` to quit.
+the staged and unstaged sections are supported. In the reversed tree order,
+the Ctrl+Up and Ctrl+Down actions swap to follow the displayed direction:
+Ctrl+Up stages or moves toward the patch stack, while Ctrl+Down spills or
+unstages toward Unstaged changes. Press `r` to refresh repository state and
+`q` to quit.
 
 On a patch node, **Ctrl+Up** moves it one position toward newer patches and
 **Ctrl+Down** moves it one position toward older patches; these actions swap in
@@ -79,6 +78,16 @@ after resolving it there. If a stash-restore conflict is resolved manually,
 the stash is retained as a backup. When the repository already has unresolved
 index conflicts, StGit Layers is locked behind a **Refresh**/**Quit** dialog
 until they are resolved.
+
+On a file or hunk within an applied patch, **Ctrl+Up/Down** moves that file or
+selected hunk to the adjacent applied patch in that visual direction. The
+direction swaps with the tree order. File moves transfer all of the file's
+patch changes; hunk moves preserve the other hunks in the source patch. The
+selection follows the moved change, and moves do not cross the applied /
+unapplied boundary. A file in the current patch still spills to **Staged
+changes** when moving toward newer patches, where no applied destination
+exists. Local staged, unstaged, and untracked changes are stashed and restored
+with their staged state preserved for the entire transfer.
 
 On an unapplied patch node, press **p** to run `stg push <patch>`. On an applied
 or current patch node, press **Shift+P** to run `stg pop <patch>`. StGit applies

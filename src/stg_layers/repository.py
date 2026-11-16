@@ -1,9 +1,10 @@
 import codecs
 import subprocess
 import tempfile
+from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
-from typing import Final
+from typing import Final, TypeVar
 
 from unidiff import PatchSet
 from unidiff.errors import UnidiffParseError
@@ -41,6 +42,16 @@ class PatchMoveResult(StrEnum):
     MOVED = "moved"
     STACK_EDGE = "stack_edge"
     APPLICATION_BOUNDARY = "application_boundary"
+
+
+class PatchChangeMoveResult(StrEnum):
+    MOVED = "moved"
+    STACK_EDGE = "stack_edge"
+    APPLICATION_BOUNDARY = "application_boundary"
+    SOURCE_NOT_APPLIED = "source_not_applied"
+
+
+_T = TypeVar("_T")
 
 
 def _parse_series(output: str) -> list[tuple[str, PatchStatus, str]]:
@@ -141,7 +152,7 @@ class StGitRepository:
         self._pending_stack_operation = False
         self._pending_stack_stash: str | None = None
         self._pending_stash_restore_conflict = False
-        self._pending_stack_undo_needed = False
+        self._pending_stack_undo_count = 0
 
     @classmethod
     def discover(cls, cwd: Path) -> StGitRepository:
@@ -309,60 +320,94 @@ class StGitRepository:
                 "in the stash list."
             ) from error
 
-    def _run_stack_operation(self, *args: str) -> str:
+    def _run_stack_transaction(
+        self,
+        operation: Callable[[Callable[..., str]], _T],
+    ) -> _T:
         self._ensure_patch_stack_is_safe()
         stash_commit = self._stash_current_changes()
+        undo_count = 0
+
+        def run_stg(*args: str) -> str:
+            nonlocal undo_count
+            # StGit records the temporary and final patch steps of refresh separately.
+            undo_steps = 2 if args and args[0] == "refresh" else 1
+            try:
+                output = self._run("stg", *args)
+            except RepositoryError:
+                if self.has_conflicts():
+                    undo_count += undo_steps
+                raise
+            undo_count += undo_steps
+            return output
+
         try:
-            output = self._run("stg", *args)
+            result = operation(run_stg)
         except RepositoryError as error:
-            self._recover_failed_stack_command(error, stash_commit)
+            self._recover_failed_stack_transaction(error, stash_commit, undo_count)
             raise
 
-        self._pending_stack_undo_needed = True
+        self._pending_stack_undo_count = undo_count
         if stash_commit is not None:
-            self._restore_stash_after_stack_command(stash_commit)
+            self._restore_stash_after_stack_transaction(stash_commit)
         self._pending_stack_operation = False
         self._pending_stack_stash = None
         self._pending_stash_restore_conflict = False
-        self._pending_stack_undo_needed = False
-        return output
+        self._pending_stack_undo_count = 0
+        return result
 
-    def _recover_failed_stack_command(
+    def _run_stack_operation(self, *args: str) -> str:
+        return self._run_stack_transaction(lambda run_stg: run_stg(*args))
+
+    def _recover_failed_stack_transaction(
         self,
         operation_error: RepositoryError,
         stash_commit: str | None,
+        undo_count: int,
     ) -> None:
         if self.has_conflicts():
             self._pending_stack_operation = True
             self._pending_stack_stash = stash_commit
             self._pending_stash_restore_conflict = False
-            self._pending_stack_undo_needed = True
+            self._pending_stack_undo_count = undo_count
             return
+
+        try:
+            while undo_count:
+                self._run("stg", "undo", "--hard")
+                undo_count -= 1
+        except RepositoryError as undo_error:
+            self._pending_stack_operation = True
+            self._pending_stack_stash = stash_commit
+            self._pending_stash_restore_conflict = False
+            self._pending_stack_undo_count = undo_count
+            raise RepositoryError(
+                f"The stack operation failed, and reverting its completed steps also failed: "
+                f"{undo_error}"
+            ) from operation_error
+
+        self._pending_stack_undo_count = 0
         if stash_commit is None:
-            self._pending_stack_undo_needed = False
             return
         try:
             self._restore_stash(stash_commit)
         except RepositoryError as restore_error:
             if self._pending_stack_stash is None:
                 self._pending_stack_operation = False
-                self._pending_stack_undo_needed = False
                 raise restore_error from operation_error
             self._pending_stack_operation = True
             self._pending_stash_restore_conflict = True
-            self._pending_stack_undo_needed = False
             raise RepositoryError(
                 f"The stack operation failed, and restoring saved local changes also failed: "
                 f"{restore_error}"
             ) from operation_error
 
-    def _restore_stash_after_stack_command(self, stash_commit: str) -> None:
+    def _restore_stash_after_stack_transaction(self, stash_commit: str) -> None:
         try:
             self._restore_stash(stash_commit)
         except RepositoryError as error:
             if self._pending_stack_stash is None:
                 self._pending_stack_operation = False
-                self._pending_stack_undo_needed = False
                 raise
             self._pending_stack_operation = True
             self._pending_stash_restore_conflict = True
@@ -414,6 +459,183 @@ class StGitRepository:
 
         return PatchMoveResult.APPLICATION_BOUNDARY
 
+    def move_patch_change(
+        self,
+        patch_name: str,
+        path: str,
+        *,
+        toward_newer: bool,
+        hunk_diff: str | None = None,
+    ) -> tuple[PatchChangeMoveResult, str | None]:
+        self._ensure_patch_stack_is_safe()
+        series = _parse_series(self._run("stg", "series", "--all"))
+        move_result, target_name, patch_index = self._patch_change_destination(
+            series,
+            patch_name,
+            toward_newer,
+        )
+        if move_result != PatchChangeMoveResult.MOVED:
+            return move_result, None
+        if target_name is None:
+            raise RepositoryError("StGit did not identify an adjacent destination patch.")
+
+        source_patch = next(
+            (patch for patch in self.load_stack() if patch.name == patch_name),
+            None,
+        )
+        if source_patch is None:
+            raise RepositoryError(f"Patch {patch_name!r} disappeared from the StGit stack.")
+        selected_diff = self._selected_patch_change_diff(
+            source_patch,
+            patch_name,
+            path,
+            hunk_diff,
+        )
+        popped_patches = tuple(
+            name
+            for name, status, _ in series[patch_index + 1 :]
+            if status in {PatchStatus.APPLIED, PatchStatus.CURRENT}
+        )
+        self._run_stack_transaction(
+            lambda run_stg: self._move_patch_change_sequence(
+                run_stg,
+                patch_name,
+                path,
+                selected_diff,
+                popped_patches,
+                toward_newer,
+            )
+        )
+        return PatchChangeMoveResult.MOVED, target_name
+
+    @staticmethod
+    def _patch_change_destination(
+        series: list[tuple[str, PatchStatus, str]],
+        patch_name: str,
+        toward_newer: bool,
+    ) -> tuple[PatchChangeMoveResult, str | None, int]:
+        patch_names = [name for name, _, _ in series]
+        try:
+            patch_index = patch_names.index(patch_name)
+        except ValueError as error:
+            raise RepositoryError(f"Patch {patch_name!r} is not in the StGit stack.") from error
+        if series[patch_index][1] not in {PatchStatus.APPLIED, PatchStatus.CURRENT}:
+            return PatchChangeMoveResult.SOURCE_NOT_APPLIED, None, patch_index
+
+        neighbor_index = patch_index + (1 if toward_newer else -1)
+        if neighbor_index < 0 or neighbor_index >= len(series):
+            return PatchChangeMoveResult.STACK_EDGE, None, patch_index
+        target_name, target_status, _ = series[neighbor_index]
+        if target_status not in {PatchStatus.APPLIED, PatchStatus.CURRENT}:
+            return PatchChangeMoveResult.APPLICATION_BOUNDARY, None, patch_index
+        return PatchChangeMoveResult.MOVED, target_name, patch_index
+
+    def _selected_patch_change_diff(
+        self,
+        source_patch: Patch,
+        patch_name: str,
+        path: str,
+        hunk_diff: str | None,
+    ) -> str:
+        source_file = next((file for file in source_patch.files if file.path == path), None)
+        if source_file is None:
+            raise RepositoryError(
+                f"File {path!r} is no longer present in patch {patch_name!r}."
+            )
+        selected_diff = source_file.diff_text
+        if hunk_diff is not None:
+            hunk = next(
+                (hunk for hunk in source_file.hunks if hunk.diff_text == hunk_diff),
+                None,
+            )
+            if hunk is None:
+                raise RepositoryError(
+                    f"The selected hunk in {path!r} is no longer present in "
+                    f"patch {patch_name!r}."
+                )
+            header_end = selected_diff.find("@@")
+            if header_end < 0:
+                raise RepositoryError(f"Patch {patch_name!r} has no text diff for {path!r}.")
+            selected_diff = selected_diff[:header_end] + hunk.diff_text
+        elif not selected_diff and source_file.status == FileStatus.BINARY:
+            selected_diff = self._raw_patch_file_diff(patch_name, path)
+        if not selected_diff:
+            raise RepositoryError(f"Patch {patch_name!r} has no applicable diff for {path!r}.")
+        return selected_diff
+
+    def _move_patch_change_sequence(
+        self,
+        run_stg: Callable[..., str],
+        source_name: str,
+        path: str,
+        selected_diff: str,
+        popped_patches: tuple[str, ...],
+        toward_newer: bool,
+    ) -> None:
+        for popped_name in reversed(popped_patches):
+            run_stg("pop", self._patch_ref(popped_name))
+
+        run_stg("spill", "--", f":(literal){path}")
+        self._run(
+            "git",
+            "apply",
+            "--cached",
+            "--binary",
+            "--reverse",
+            input_text=selected_diff,
+        )
+        run_stg("refresh", "--index")
+        self._run("git", "--literal-pathspecs", "restore", "--worktree", "--", path)
+
+        if not toward_newer:
+            run_stg("pop", self._patch_ref(source_name))
+            self._run(
+                "git",
+                "apply",
+                "--cached",
+                "--binary",
+                input_text=selected_diff,
+            )
+            run_stg("refresh", "--index")
+            self._run("git", "--literal-pathspecs", "restore", "--worktree", "--", path)
+            run_stg("push", self._patch_ref(source_name))
+
+        for popped_name in popped_patches:
+            run_stg("push", "--set-tree", self._patch_ref(popped_name))
+
+    def _raw_patch_file_diff(self, patch_name: str, path: str) -> str:
+        diff = self._run(
+            "stg",
+            "show",
+            "--patch",
+            self._patch_ref(patch_name),
+            "--diff-opt=--patch",
+            "--diff-opt=--binary",
+            "--diff-opt=--no-color",
+            "--diff-opt=--no-ext-diff",
+            "--diff-opt=--no-textconv",
+        )
+        try:
+            patch_set = PatchSet.from_string(diff)
+        except (TypeError, UnidiffParseError, ValueError) as error:
+            raise DiffError(f"Could not parse diff for patch {patch_name!r}: {error}") from error
+        lines = diff.splitlines(keepends=True)
+        section_starts = [
+            index for index, line in enumerate(lines) if line.startswith("diff --git ")
+        ]
+        sections = [
+            "".join(lines[start:end])
+            for start, end in zip(
+                section_starts,
+                (*section_starts[1:], len(lines)),
+                strict=True,
+            )
+        ]
+        for patched_file, section in zip(patch_set, sections, strict=True):
+            if _decode_git_path(patched_file.path) == path:
+                return section
+        raise RepositoryError(f"Could not find binary diff for {path!r} in patch {patch_name!r}.")
+
     def push_patch(self, patch_name: str) -> None:
         self._run_stack_operation("push", self._patch_ref(patch_name))
 
@@ -425,8 +647,9 @@ class StGitRepository:
         return f"\\{patch_name}" if patch_name.startswith("-") else patch_name
 
     def undo_stack_operation(self) -> None:
-        if self._pending_stack_undo_needed:
+        while self._pending_stack_undo_count:
             self._run("stg", "undo", "--hard")
+            self._pending_stack_undo_count -= 1
         if self._pending_stack_stash is not None:
             stash_commit = self._pending_stack_stash
             try:
@@ -441,7 +664,7 @@ class StGitRepository:
         self._pending_stack_operation = False
         self._pending_stack_stash = None
         self._pending_stash_restore_conflict = False
-        self._pending_stack_undo_needed = False
+        self._pending_stack_undo_count = 0
 
     def refresh_stack_operation(self) -> str | None:
         if self.has_conflicts():
@@ -451,7 +674,7 @@ class StGitRepository:
         if self._pending_stack_stash is None:
             self._pending_stack_operation = False
             self._pending_stash_restore_conflict = False
-            self._pending_stack_undo_needed = False
+            self._pending_stack_undo_count = 0
             return None
 
         stash_commit = self._pending_stack_stash
@@ -459,7 +682,7 @@ class StGitRepository:
             self._pending_stack_stash = None
             self._pending_stash_restore_conflict = False
             self._pending_stack_operation = False
-            self._pending_stack_undo_needed = False
+            self._pending_stack_undo_count = 0
             return stash_commit
 
         try:
@@ -468,7 +691,7 @@ class StGitRepository:
             self._pending_stash_restore_conflict = True
             raise
         self._pending_stack_operation = False
-        self._pending_stack_undo_needed = False
+        self._pending_stack_undo_count = 0
         return None
 
     def stage_file(self, path: str) -> None:

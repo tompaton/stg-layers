@@ -6,7 +6,11 @@ from textual.widgets import Static, TextArea, Tree
 
 from stg_layers.app import ConflictDialog, StgLayersApp
 from stg_layers.models import DiffHunk, FileChange, FileStatus, Patch, PatchStatus
-from stg_layers.repository import PatchMoveResult, RepositoryError
+from stg_layers.repository import (
+    PatchChangeMoveResult,
+    PatchMoveResult,
+    RepositoryError,
+)
 
 
 class FixtureRepository:
@@ -19,6 +23,7 @@ class FixtureRepository:
         self.moved_files: list[str] = []
         self.spilled_files: list[str] = []
         self.patch_moves: list[tuple[str, bool]] = []
+        self.patch_change_moves: list[tuple[str, str, bool, str | None]] = []
         self.patch_pushes: list[str] = []
         self.patch_pops: list[str] = []
         self.undo_count = 0
@@ -102,6 +107,17 @@ class FixtureRepository:
             self.conflicted = True
             raise RepositoryError("Merge conflict")
         return PatchMoveResult.MOVED
+
+    def move_patch_change(
+        self,
+        patch_name: str,
+        path: str,
+        *,
+        toward_newer: bool,
+        hunk_diff: str | None = None,
+    ) -> tuple[PatchChangeMoveResult, str | None]:
+        self.patch_change_moves.append((patch_name, path, toward_newer, hunk_diff))
+        return PatchChangeMoveResult.STACK_EDGE, None
 
     def push_patch(self, patch_name: str) -> None:
         self.patch_pushes.append(patch_name)
@@ -229,6 +245,98 @@ class MutableFixtureRepository(FixtureRepository):
     def spill_current_patch_file(self, path: str) -> None:
         super().spill_current_patch_file(path)
         self._move_file(self.patch_files, self.staged, path)
+
+
+class PatchChangeFixtureRepository(FixtureRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.patch_files = {
+            "older": [
+                self._file_with_hunks(
+                    "shared.py",
+                    (
+                        self._hunk(1, "old first", "new first"),
+                        self._hunk(20, "old second", "new second"),
+                    ),
+                )
+            ],
+            "current": [],
+        }
+
+    @staticmethod
+    def _hunk(line: int, old: str, new: str) -> DiffHunk:
+        return DiffHunk(
+            index=0,
+            header=f"@@ -{line} +{line} @@",
+            diff_text=f"@@ -{line} +{line} @@\n-{old}\n+{new}\n",
+            source_start=line,
+            source_length=1,
+            target_start=line,
+            target_length=1,
+        )
+
+    @staticmethod
+    def _file_with_hunks(path: str, hunks: tuple[DiffHunk, ...]) -> FileChange:
+        base = FixtureRepository()._file_change(path, "old", "new")
+        indexed_hunks = tuple(replace(hunk, index=index) for index, hunk in enumerate(hunks))
+        diff_text = f"diff --git a/{path} b/{path}\n"
+        diff_text += "".join(hunk.diff_text for hunk in indexed_hunks)
+        return replace(base, diff_text=diff_text, hunks=indexed_hunks)
+
+    def load_stack(self) -> tuple[Patch, ...]:
+        return (
+            Patch("older", PatchStatus.APPLIED, "Older patch", tuple(self.patch_files["older"])),
+            Patch(
+                "current",
+                PatchStatus.CURRENT,
+                "Current patch",
+                tuple(self.patch_files["current"]),
+            ),
+        )
+
+    def move_patch_change(
+        self,
+        patch_name: str,
+        path: str,
+        *,
+        toward_newer: bool,
+        hunk_diff: str | None = None,
+    ) -> tuple[PatchChangeMoveResult, str | None]:
+        self.patch_change_moves.append((patch_name, path, toward_newer, hunk_diff))
+        source_index = ("older", "current").index(patch_name)
+        target_name = ("older", "current")[source_index + (1 if toward_newer else -1)]
+        source_files = self.patch_files[patch_name]
+        file_index = next(index for index, file in enumerate(source_files) if file.path == path)
+        source_file = source_files[file_index]
+        if hunk_diff is None:
+            moved_file = source_files.pop(file_index)
+            self.patch_files[target_name].append(moved_file)
+        else:
+            hunk_index = next(
+                index
+                for index, hunk in enumerate(source_file.hunks)
+                if hunk.diff_text == hunk_diff
+            )
+            moved_hunk = source_file.hunks[hunk_index]
+            remaining_hunks = tuple(
+                hunk for index, hunk in enumerate(source_file.hunks) if index != hunk_index
+            )
+            if remaining_hunks:
+                source_files[file_index] = self._file_with_hunks(path, remaining_hunks)
+            else:
+                source_files.pop(file_index)
+            target_files = self.patch_files[target_name]
+            target_index = next(
+                (index for index, file in enumerate(target_files) if file.path == path),
+                None,
+            )
+            target_hunks = target_files[target_index].hunks if target_index is not None else ()
+            moved_file = self._file_with_hunks(path, (*target_hunks, moved_hunk))
+            if target_index is None:
+                target_files.append(moved_file)
+            else:
+                target_files[target_index] = moved_file
+        return PatchChangeMoveResult.MOVED, target_name
 
 
 def test_app_renders_patch_file_hunk_tree() -> None:
@@ -764,6 +872,78 @@ def test_ctrl_up_spills_only_a_current_patch_file() -> None:
             tree.move_cursor(staged_file)
             await pilot.press("ctrl+up")
             assert repository.spilled_files == ["example [typing].py"]
+
+    asyncio.run(run_app())
+
+
+def test_ctrl_up_down_move_selected_hunks_between_adjacent_patches() -> None:
+    async def run_app() -> None:
+        repository = PatchChangeFixtureRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.focus()
+            patch_stack = tree.root.children[2]
+            older_patch = next(
+                node
+                for node in patch_stack.children
+                if node.data is not None and node.data.patch_name == "older"
+            )
+            older_file = older_patch.children[0]
+            older_file.expand()
+            await pilot.pause()
+            selected_hunk = older_file.children[0]
+            selected_hunk_data = selected_hunk.data
+            assert selected_hunk_data is not None
+            tree.move_cursor(selected_hunk)
+
+            await pilot.press("ctrl+up")
+            await pilot.pause()
+
+            selected_node = tree.cursor_node
+            assert selected_node is not None
+            selected = selected_node.data
+            assert selected is not None
+            assert selected.patch_name == "current"
+            assert selected.file_path == "shared.py"
+            assert selected.hunk_key == StgLayersApp._hunk_key(
+                repository.patch_files["current"][0].hunks[0].diff_text
+            )
+            assert repository.patch_change_moves == [
+                ("older", "shared.py", True, selected_hunk_data.diff_text)
+            ]
+
+            await pilot.press("ctrl+down")
+            await pilot.pause()
+            selected_node = tree.cursor_node
+            assert selected_node is not None
+            selected = selected_node.data
+            assert selected is not None
+            assert selected.patch_name == "older"
+            assert repository.patch_change_moves[-1][2] is False
+
+            await pilot.press("R")
+            await pilot.pause()
+            patch_stack = tree.root.children[0]
+            older_patch = next(
+                node
+                for node in patch_stack.children
+                if node.data is not None and node.data.patch_name == "older"
+            )
+            older_file = older_patch.children[0]
+            older_file.expand()
+            await pilot.pause()
+            tree.move_cursor(older_file.children[0])
+            await pilot.press("ctrl+down")
+            await pilot.pause()
+
+            assert repository.patch_change_moves[-1][2] is True
+            selected_node = tree.cursor_node
+            assert selected_node is not None
+            selected = selected_node.data
+            assert selected is not None
+            assert selected.patch_name == "current"
 
     asyncio.run(run_app())
 

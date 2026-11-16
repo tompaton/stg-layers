@@ -17,7 +17,11 @@ from tree_sitter_diff import HIGHLIGHTS_QUERY
 from tree_sitter_diff import language as diff_language
 
 from stg_layers.models import FileChange, FileStatus, Patch, PatchStatus, TreeItem
-from stg_layers.repository import PatchMoveResult, RepositoryError
+from stg_layers.repository import (
+    PatchChangeMoveResult,
+    PatchMoveResult,
+    RepositoryError,
+)
 
 _DIFF_THEME = TextAreaTheme(
     name="stg-diff",
@@ -87,6 +91,15 @@ class StackReader(Protocol):
         *,
         toward_newer: bool,
     ) -> PatchMoveResult: ...
+
+    def move_patch_change(
+        self,
+        patch_name: str,
+        path: str,
+        *,
+        toward_newer: bool,
+        hunk_diff: str | None = None,
+    ) -> tuple[PatchChangeMoveResult, str | None]: ...
 
     def push_patch(self, patch_name: str) -> None: ...
 
@@ -694,6 +707,8 @@ class StgLayersApp(App[None]):
     async def action_move_change_down(self) -> None:
         if await self._reorder_selected_patch(toward_newer=not self.newest_first):
             return
+        if await self._move_selected_patch_change(toward_newer=not self.newest_first):
+            return
         if self.newest_first:
             await self.action_move_staged_file_to_current_patch()
         else:
@@ -702,10 +717,100 @@ class StgLayersApp(App[None]):
     async def action_move_change_up(self) -> None:
         if await self._reorder_selected_patch(toward_newer=self.newest_first):
             return
+        if await self._move_selected_patch_change(toward_newer=self.newest_first):
+            return
         if self.newest_first:
             await self.action_spill_current_patch_file()
         else:
             await self.action_move_staged_file_to_current_patch()
+
+    async def _move_selected_patch_change(self, *, toward_newer: bool) -> bool:
+        tree = self.query_one("#patch-tree", LayerTree)
+        node = tree.cursor_node
+        item = node.data if node is not None else None
+        if (
+            item is None
+            or item.patch_name is None
+            or item.file_path is None
+            or self._loaded_data is None
+        ):
+            return False
+        if not await self._ensure_repository_ready():
+            return True
+
+        patches = self._loaded_data[0]
+        source_index = next(
+            (index for index, patch in enumerate(patches) if patch.name == item.patch_name),
+            None,
+        )
+        if source_index is None:
+            return False
+        source_patch = patches[source_index]
+        change_name = "hunk" if item.hunk_index is not None else "file"
+        direction = "newer" if toward_newer else "older"
+        self.query_one("#status", Static).update(
+            f"Moving {change_name} {item.file_path} {direction} from "
+            f"patch {item.patch_name}..."
+        )
+        try:
+            result, moved_to = await asyncio.to_thread(
+                self.repository.move_patch_change,
+                item.patch_name,
+                item.file_path,
+                toward_newer=toward_newer,
+                hunk_diff=item.diff_text if item.hunk_index is not None else None,
+            )
+        except RepositoryError as error:
+            await self._handle_stack_operation_error(error)
+            return True
+
+        if result != PatchChangeMoveResult.MOVED:
+            return self._show_patch_change_move_result(
+                result,
+                source_patch.status,
+                item.patch_name,
+                toward_newer,
+                item.hunk_index is None,
+            )
+        if moved_to is None:
+            self.query_one("#status", Static).update(
+                f"Could not determine the destination patch for {item.file_path}."
+            )
+            return True
+
+        await self._load_stack(
+            preferred_selection=TreeItem(
+                title="",
+                diff_text="",
+                patch_name=moved_to,
+                file_path=item.file_path,
+                hunk_index=item.hunk_index,
+                hunk_key=item.hunk_key,
+            ),
+            expansion_fallback_path=item.file_path,
+        )
+        return True
+
+    def _show_patch_change_move_result(
+        self,
+        result: PatchChangeMoveResult,
+        source_status: PatchStatus,
+        patch_name: str,
+        toward_newer: bool,
+        selected_file: bool,
+    ) -> bool:
+        if result == PatchChangeMoveResult.STACK_EDGE:
+            if toward_newer and source_status == PatchStatus.CURRENT and selected_file:
+                return False
+            message = f"Patch {patch_name} is at the edge of the stack."
+        elif result == PatchChangeMoveResult.APPLICATION_BOUNDARY:
+            if toward_newer and source_status == PatchStatus.CURRENT and selected_file:
+                return False
+            message = "Changes can only be moved between adjacent applied patches."
+        else:
+            message = "Changes can only be moved from applied patches."
+        self.query_one("#status", Static).update(message)
+        return True
 
     async def _reorder_selected_patch(self, *, toward_newer: bool) -> bool:
         tree = self.query_one("#patch-tree", LayerTree)
