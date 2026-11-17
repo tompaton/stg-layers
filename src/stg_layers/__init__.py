@@ -2,7 +2,8 @@ import sys
 from pathlib import Path
 
 from stg_layers.app import StgLayersApp
-from stg_layers.repository import RepositoryError, StGitRepository
+from stg_layers.errors import RepositoryError
+from stg_layers.repository import StGitRepository
 
 
 def main() -> None:

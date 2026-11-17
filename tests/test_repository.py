@@ -5,16 +5,14 @@ from pathlib import Path
 
 import pytest
 
+from stg_layers.commands import CommandRunner
+from stg_layers.errors import CommandError, RepositoryError
+from stg_layers.git import Git
 from stg_layers.models import FileStatus, PatchStatus
 from stg_layers.repository import (
-    CommandError,
-    DiffError,
     PatchChangeMoveResult,
     PatchMoveResult,
-    RepositoryError,
     StGitRepository,
-    _parse_diff,
-    _parse_series,
 )
 
 
@@ -127,19 +125,37 @@ def _create_git_repository(root: Path, environment: dict[str, str]) -> None:
     _run(root, environment, "git", "commit", "-qm", "base")
 
 
+@pytest.mark.parametrize(
+    "operation,patch_name,message",
+    [
+        ("unknown", "patch", "Unknown patch operation"),
+        ("push", None, "requires a patch name"),
+        ("uncommit", "patch", "requires no patch name"),
+    ],
+)
+def test_patch_operation_validates_arguments_before_running_commands(
+    tmp_path: Path, operation: str, patch_name: str | None, message: str
+) -> None:
+    # This directory is not a repository; invalid requests must fail before Git runs.
+    repository = StGitRepository(tmp_path)
+    with pytest.raises(RepositoryError, match=message):
+        repository.patch_operation(operation, patch_name)
+
+
 def test_commit_selected_patch_and_uncommit_one_commit(tmp_path: Path) -> None:
     environment = _git_environment()
     _create_three_patch_stack(tmp_path, environment)
     repository = StGitRepository(tmp_path)
     (tmp_path / "local.txt").write_text("local\n", encoding="utf-8")
 
-    repository.commit_patch("second")
+    repository.patch_operation("commit", "second")
 
     assert [patch.name for patch in repository.load_stack()] == ["first", "third"]
-    assert _run(
-        tmp_path, environment, "git", "log", "-1", "--format=%s", "HEAD~2"
-    ).strip() == "Second patch"
-    repository.uncommit_patch()
+    assert (
+        _run(tmp_path, environment, "git", "log", "-1", "--format=%s", "HEAD~2").strip()
+        == "Second patch"
+    )
+    repository.patch_operation("uncommit")
     patches = repository.load_stack()
     assert len(patches) == 3
     assert "+current layer" in patches[0].diff_text
@@ -162,13 +178,13 @@ def test_hide_unhide_and_delete_patch_preserve_local_changes(
     (tmp_path / "fourth.txt").write_text("unstaged local\n", encoding="utf-8")
     original_status = _run(tmp_path, environment, "git", "status", "--porcelain")
 
-    repository.hide_patch("second")
+    repository.patch_operation("hide", "second")
     patches = {patch.name: patch for patch in repository.load_stack()}
     assert patches["second"].status == PatchStatus.HIDDEN
-    repository.unhide_patch("second")
+    repository.patch_operation("unhide", "second")
     patches = {patch.name: patch for patch in repository.load_stack()}
     assert patches["second"].status == PatchStatus.UNAPPLIED
-    repository.delete_patch("second")
+    repository.patch_operation("delete", "second")
     assert [patch.name for patch in repository.load_stack()] == ["first", "third"]
     assert _run(tmp_path, environment, "git", "status", "--porcelain") == original_status
     assert "+staged local" in _run(tmp_path, environment, "git", "diff", "--cached")
@@ -178,7 +194,7 @@ def test_hide_unhide_and_delete_patch_preserve_local_changes(
 
 @pytest.mark.parametrize(
     "operation,patch",
-    [("commit_patch", "second"), ("delete_patch", "first"), ("hide_patch", "first")],
+    [("commit", "second"), ("delete", "first"), ("hide", "first")],
 )
 def test_conflicting_patch_operations_can_be_undone(
     tmp_path: Path, operation: str, patch: str
@@ -191,7 +207,7 @@ def test_conflicting_patch_operations_can_be_undone(
     (tmp_path / "local.txt").write_text("local\n", encoding="utf-8")
 
     with pytest.raises(CommandError):
-        getattr(repository, operation)(patch)
+        repository.patch_operation(operation, patch)
 
     assert repository.has_conflicts()
     assert repository.stack_operation_pending
@@ -210,7 +226,7 @@ def test_uncommit_with_an_empty_patch_stack(tmp_path: Path) -> None:
     repository = StGitRepository(tmp_path)
     original_head = _run(tmp_path, environment, "git", "rev-parse", "HEAD")
 
-    repository.uncommit_patch()
+    repository.patch_operation("uncommit")
 
     patches = repository.load_stack()
     assert len(patches) == 1
@@ -230,7 +246,7 @@ def test_delete_selected_patch_in_each_state(tmp_path: Path, status: str) -> Non
     if status == "hidden":
         _run(tmp_path, environment, "stg", "hide", "second")
 
-    repository.delete_patch("second")
+    repository.patch_operation("delete", "second")
 
     assert [patch.name for patch in repository.load_stack()] == ["first", "third"]
     assert not _run(tmp_path, environment, "git", "status", "--porcelain")
@@ -275,7 +291,8 @@ def test_move_directory_files_between_patches(tmp_path: Path, toward_newer: bool
     original_status = _run(tmp_path, environment, "git", "status", "--porcelain")
 
     assert repository.move_patch_changes(source, paths, toward_newer=toward_newer) == (
-        PatchChangeMoveResult.MOVED, target
+        PatchChangeMoveResult.MOVED,
+        target,
     )
 
     patches = {patch.name: patch for patch in repository.load_stack()}
@@ -300,26 +317,33 @@ def test_failed_directory_move_rolls_back_all_files(
     original_stack = repository.load_stack()
     original_head = _run(tmp_path, environment, "git", "rev-parse", "HEAD")
     (tmp_path / "local.txt").write_text("preserved\n", encoding="utf-8")
-    run = repository._run
+    run = repository.commands.run
 
     def fail_second_file(
-        executable: str, *args: str, allowed_returncodes: tuple[int, ...] = (),
+        executable: str,
+        *args: str,
+        allowed_returncodes: tuple[int, ...] = (),
         input_text: str | None = None,
     ) -> str:
         if executable == "stg" and args == ("spill", "--", f":(literal){paths[1]}"):
             if conflict:
                 run(executable, *args)
                 blob = run("git", "rev-parse", "HEAD:file.txt").strip()
-                run("git", "update-index", "--index-info", input_text=(
-                    f"100644 {blob} 1\tfile.txt\n100644 {blob} 2\tfile.txt\n"
-                    f"100644 {blob} 3\tfile.txt\n"
-                ))
+                run(
+                    "git",
+                    "update-index",
+                    "--index-info",
+                    input_text=(
+                        f"100644 {blob} 1\tfile.txt\n100644 {blob} 2\tfile.txt\n"
+                        f"100644 {blob} 3\tfile.txt\n"
+                    ),
+                )
             raise RepositoryError("Injected second file failure")
         return run(
             executable, *args, allowed_returncodes=allowed_returncodes, input_text=input_text
         )
 
-    monkeypatch.setattr(repository, "_run", fail_second_file)
+    monkeypatch.setattr(repository.commands, "run", fail_second_file)
     with pytest.raises(RepositoryError, match="Injected second file failure"):
         repository.move_patch_changes("first", paths, toward_newer=True)
     if conflict:
@@ -353,9 +377,9 @@ def test_directory_spill_and_refresh_preserve_other_staged_and_unstaged_changes(
     assert "+local unstaged" in _run(tmp_path, environment, "git", "diff")
     repository.refresh_staged_files_to_current_patch(paths)
     assert repository.load_stack() == original_stack
-    assert _run(
-        tmp_path, environment, "git", "diff", "--cached", "--name-only"
-    ).strip() == "file.txt"
+    assert (
+        _run(tmp_path, environment, "git", "diff", "--cached", "--name-only").strip() == "file.txt"
+    )
     assert (tmp_path / paths[0]).read_text(encoding="utf-8") == "new\nlocal unstaged\n"
 
 
@@ -403,7 +427,7 @@ def test_stage_and_unstage_directory_files_use_exact_paths(tmp_path: Path) -> No
     (tmp_path / "dir/nested/n.txt").write_text("not selected\n", encoding="utf-8")
     (tmp_path / "file.txt").write_text("unrelated staged\n", encoding="utf-8")
     _run(tmp_path, environment, "git", "add", "file.txt")
-    repository = StGitRepository(tmp_path)
+    repository = Git(CommandRunner(tmp_path))
 
     repository.stage_files(paths)
 
@@ -411,22 +435,11 @@ def test_stage_and_unstage_directory_files_use_exact_paths(tmp_path: Path) -> No
         _run(tmp_path, environment, "git", "diff", "--cached", "--name-only").splitlines()
     ) == {*paths, "file.txt"}
     repository.unstage_files(paths)
-    assert _run(
-        tmp_path, environment, "git", "diff", "--cached", "--name-only"
-    ).strip() == "file.txt"
+    assert (
+        _run(tmp_path, environment, "git", "diff", "--cached", "--name-only").strip() == "file.txt"
+    )
     assert not (tmp_path / paths[0]).exists()
     assert (tmp_path / paths[1]).read_text(encoding="utf-8") == "new\n"
-
-
-def test_parse_series_records_patch_state_and_description() -> None:
-    output = "> current # current patch\n+ earlier # applied patch\n- next # queued patch\n! hidden"
-
-    assert _parse_series(output) == [
-        ("current", PatchStatus.CURRENT, "current patch"),
-        ("earlier", PatchStatus.APPLIED, "applied patch"),
-        ("next", PatchStatus.UNAPPLIED, "queued patch"),
-        ("hidden", PatchStatus.HIDDEN, ""),
-    ]
 
 
 def test_move_patch_one_step_reorders_only_the_selected_patch(tmp_path: Path) -> None:
@@ -563,9 +576,7 @@ def test_stack_reorder_preserves_untracked_changes(tmp_path: Path) -> None:
     repository = StGitRepository(tmp_path)
     (tmp_path / "local.txt").write_text("uncommitted\n", encoding="utf-8")
 
-    assert repository.move_patch_one_step("first", toward_newer=True) == (
-        PatchMoveResult.MOVED
-    )
+    assert repository.move_patch_one_step("first", toward_newer=True) == (PatchMoveResult.MOVED)
 
     patches = repository.load_stack()
     assert [patch.name for patch in patches] == ["second", "first"]
@@ -582,14 +593,14 @@ def test_push_and_pop_selected_patch(tmp_path: Path) -> None:
     _create_four_patch_stack(tmp_path, environment)
     repository = StGitRepository(tmp_path)
 
-    repository.pop_patch("second")
+    repository.patch_operation("pop", "second")
 
     patches = repository.load_stack()
     second = next(patch for patch in patches if patch.name == "second")
     assert second.status == PatchStatus.UNAPPLIED
     assert sum(patch.status == PatchStatus.UNAPPLIED for patch in patches) == 1
 
-    repository.push_patch("second")
+    repository.patch_operation("push", "second")
 
     patches = repository.load_stack()
     assert next(patch for patch in patches if patch.name == "second").status in {
@@ -609,7 +620,7 @@ def test_push_can_target_a_later_unapplied_patch(tmp_path: Path) -> None:
     _run(tmp_path, environment, "stg", "pop", "-n", "2")
     repository = StGitRepository(tmp_path)
 
-    repository.push_patch("fourth")
+    repository.patch_operation("push", "fourth")
 
     patches = repository.load_stack()
     assert next(patch for patch in patches if patch.name == "fourth").status == (
@@ -643,8 +654,8 @@ def test_push_and_pop_preserve_staged_unstaged_and_untracked_changes(
     )
     (tmp_path / "local-untracked.txt").write_text("untracked change\n", encoding="utf-8")
 
-    repository.pop_patch("second")
-    repository.push_patch("second")
+    repository.patch_operation("pop", "second")
+    repository.patch_operation("push", "second")
 
     staged_diff = _run(tmp_path, environment, "git", "diff", "--cached", "--", "base.txt")
     unstaged_diff = _run(tmp_path, environment, "git", "diff", "--", "base.txt")
@@ -652,9 +663,7 @@ def test_push_and_pop_preserve_staged_unstaged_and_untracked_changes(
     assert "+unstaged change" not in staged_diff
     assert "+unstaged change" in unstaged_diff
     assert "+staged change" not in unstaged_diff
-    assert (tmp_path / "local-untracked.txt").read_text(encoding="utf-8") == (
-        "untracked change\n"
-    )
+    assert (tmp_path / "local-untracked.txt").read_text(encoding="utf-8") == ("untracked change\n")
     assert not _run(tmp_path, environment, "git", "stash", "list")
 
 
@@ -735,7 +744,7 @@ def test_undo_stash_restore_conflict_reverts_stack_and_restores_index(tmp_path: 
     repository = StGitRepository(tmp_path)
 
     with pytest.raises(RepositoryError, match="restoring saved local changes failed"):
-        repository.push_patch("patch")
+        repository.patch_operation("push", "patch")
 
     assert repository.stash_restore_conflict
     assert repository.stack_operation_pending
@@ -759,148 +768,12 @@ def test_undo_stash_restore_conflict_reverts_stack_and_restores_index(tmp_path: 
 def test_staged_changes_with_auto_merge_marker_are_not_conflicts(tmp_path: Path) -> None:
     environment = _git_environment()
     _create_two_patch_stack(tmp_path, environment)
-    repository = StGitRepository(tmp_path)
+    repository = Git(CommandRunner(tmp_path))
     (tmp_path / ".git" / "AUTO_MERGE").write_text("stale merge tree\n", encoding="utf-8")
     (tmp_path / "dummy-file").write_text("dummy change\n", encoding="utf-8")
     _run(tmp_path, environment, "git", "add", "--", "dummy-file")
 
     assert not repository.has_conflicts()
-
-
-def test_parse_series_rejects_unknown_status() -> None:
-    with pytest.raises(RepositoryError, match="Unrecognized output"):
-        _parse_series("? patch")
-
-
-def test_parse_diff_retains_file_hunks_and_line_ranges() -> None:
-    output = """commit deadbeef
-
-diff --git a/example.txt b/example.txt
-index 1234567..7654321 100644
---- a/example.txt
-+++ b/example.txt
-@@ -2,2 +2,2 @@ context
- unchanged
--before
-+after
-"""
-
-    (file,) = _parse_diff("example", output)
-
-    assert file.path == "example.txt"
-    assert file.status == FileStatus.MODIFIED
-    assert len(file.hunks) == 1
-    hunk = file.hunks[0]
-    assert hunk.header == "@@ -2,2 +2,2 @@ context"
-    assert hunk.source_start == 2
-    assert hunk.target_start == 2
-    assert "-before" in hunk.diff_text
-    assert "+after" in hunk.diff_text
-
-
-def test_parse_diff_keeps_multiple_hunks_distinct_within_one_file() -> None:
-    output = """diff --git a/example.txt b/example.txt
---- a/example.txt
-+++ b/example.txt
-@@ -1,2 +1,2 @@
--first
-+first changed
- context
-@@ -10,2 +10,2 @@
--last
-+last changed
- context
-"""
-
-    (file,) = _parse_diff("multiple-hunks", output)
-
-    assert file.path == "example.txt"
-    assert [hunk.index for hunk in file.hunks] == [0, 1]
-    assert [hunk.header for hunk in file.hunks] == [
-        "@@ -1,2 +1,2 @@",
-        "@@ -10,2 +10,2 @@",
-    ]
-
-
-def test_parse_diff_preserves_rename_paths() -> None:
-    output = """diff --git a/old.txt b/new.txt
-similarity index 90%
-rename from old.txt
-rename to new.txt
---- a/old.txt
-+++ b/new.txt
-@@ -1 +1 @@
--before
-+after
-"""
-
-    (file,) = _parse_diff("rename", output)
-
-    assert file.status == FileStatus.RENAMED
-    assert file.source_path == "old.txt"
-    assert file.target_path == "new.txt"
-    assert file.path == "new.txt"
-
-
-def test_parse_diff_decodes_quoted_paths() -> None:
-    output = """diff --git "a/file with spaces.txt" "b/file with spaces.txt"
-index 1234567..7654321 100644
---- "a/file with spaces.txt"
-+++ "b/file with spaces.txt"
-@@ -1 +1 @@
--before
-+after
-"""
-
-    (file,) = _parse_diff("quoted", output)
-
-    assert file.path == "file with spaces.txt"
-    assert file.source_path == "file with spaces.txt"
-    assert file.target_path == "file with spaces.txt"
-
-
-def test_parse_diff_decodes_git_octal_path_escapes() -> None:
-    output = r"""diff --git "a/caf\303\251.txt" "b/caf\303\251.txt"
-index 1234567..7654321 100644
---- "a/caf\303\251.txt"
-+++ "b/caf\303\251.txt"
-@@ -1 +1 @@
--before
-+after
-"""
-
-    (file,) = _parse_diff("unicode", output)
-
-    assert file.path == "café.txt"
-
-
-def test_parse_diff_marks_binary_files_without_fake_text_diff() -> None:
-    output = """diff --git a/image.bin b/image.bin
-index 1234567..7654321 100644
-GIT binary patch
-literal 1
-AcmZQ
-
-literal 1
-AcmZQ
-"""
-
-    (file,) = _parse_diff("binary", output)
-
-    assert file.path == "image.bin"
-    assert file.status == FileStatus.BINARY
-    assert not file.hunks
-    assert not file.diff_text
-
-
-def test_parse_diff_accepts_empty_patches() -> None:
-    assert _parse_diff("empty", "commit deadbeef\n") == ()
-
-
-def test_parse_diff_reports_malformed_diff() -> None:
-    malformed = "diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ not a hunk\n"
-    with pytest.raises(DiffError, match="malformed"):
-        _parse_diff("malformed", malformed)
 
 
 def test_discover_rejects_non_repository(tmp_path: Path) -> None:
@@ -1032,7 +905,7 @@ def test_refresh_staged_file_moves_only_selected_file_into_current_patch(
         encoding="utf-8",
     )
 
-    repository.refresh_staged_file_to_current_patch("other.txt")
+    repository.refresh_staged_files_to_current_patch(("other.txt",))
 
     patches = repository.load_stack()
     current_patch = next(patch for patch in patches if patch.status == PatchStatus.CURRENT)
@@ -1060,7 +933,7 @@ def test_refresh_staged_file_into_empty_current_patch(tmp_path: Path) -> None:
     (tmp_path / "dummy-file").write_text("dummy change\n", encoding="utf-8")
     _run(tmp_path, environment, "git", "add", "--", "dummy-file")
 
-    repository.refresh_staged_file_to_current_patch("dummy-file")
+    repository.refresh_staged_files_to_current_patch(("dummy-file",))
 
     patches = repository.load_stack()
     assert patches[-2].name == "empty-first"
@@ -1080,16 +953,12 @@ def test_refresh_staged_rename_moves_both_paths_into_current_patch(tmp_path: Pat
     repository = StGitRepository.discover(tmp_path)
     _run(tmp_path, environment, "git", "mv", "other.txt", "renamed.txt")
 
-    repository.refresh_staged_file_to_current_patch("renamed.txt")
+    repository.refresh_staged_files_to_current_patch(("renamed.txt",))
 
     current_patch = next(
-        patch
-        for patch in repository.load_stack()
-        if patch.status == PatchStatus.CURRENT
+        patch for patch in repository.load_stack() if patch.status == PatchStatus.CURRENT
     )
-    assert {
-        (file.path, file.status) for file in current_patch.files
-    } == {
+    assert {(file.path, file.status) for file in current_patch.files} == {
         ("other.txt", FileStatus.DELETED),
         ("renamed.txt", FileStatus.ADDED),
     }
@@ -1118,7 +987,7 @@ def test_spill_current_patch_file_preserves_other_staged_and_same_file_unstaged_
     )
     _run(tmp_path, environment, "git", "add", "--", "base.txt")
 
-    repository.spill_current_patch_file("other.txt")
+    repository.spill_current_patch_files(("other.txt",))
 
     patches = repository.load_stack()
     current_patch = next(patch for patch in patches if patch.status == PatchStatus.CURRENT)
@@ -1150,12 +1019,10 @@ def test_spill_current_patch_file_rejects_staged_changes_on_selected_path(
     _run(tmp_path, environment, "git", "add", "--", "other.txt")
 
     with pytest.raises(RepositoryError, match="Unstage those changes first"):
-        repository.spill_current_patch_file("other.txt")
+        repository.spill_current_patch_files(("other.txt",))
 
     current_patch = next(
-        patch
-        for patch in repository.load_stack()
-        if patch.status == PatchStatus.CURRENT
+        patch for patch in repository.load_stack() if patch.status == PatchStatus.CURRENT
     )
     assert "+current layer" in current_patch.diff_text
     assert "+staged selected" in _run(tmp_path, environment, "git", "diff", "--cached")
@@ -1204,9 +1071,7 @@ def test_move_file_to_newer_patch_reapplies_the_stack_and_preserves_local_change
     assert "+unstaged local" not in staged_diff
     assert "+unstaged local" in unstaged_diff
     assert "+staged local" not in unstaged_diff
-    assert (tmp_path / "local-untracked.txt").read_text(encoding="utf-8") == (
-        "untracked local\n"
-    )
+    assert (tmp_path / "local-untracked.txt").read_text(encoding="utf-8") == ("untracked local\n")
     assert not _run(tmp_path, environment, "git", "stash", "list")
 
 
@@ -1216,9 +1081,7 @@ def test_move_file_to_newer_patch_reapplies_the_stack_and_preserves_local_change
 )
 @pytest.mark.parametrize("toward_newer", [False, True])
 @pytest.mark.parametrize("binary", [False, True])
-def test_move_added_file_between_patches(
-    tmp_path: Path, toward_newer: bool, binary: bool
-) -> None:
+def test_move_added_file_between_patches(tmp_path: Path, toward_newer: bool, binary: bool) -> None:
     environment = _git_environment()
     _create_two_patch_stack(tmp_path, environment)
     source = "first" if toward_newer else "second"
@@ -1429,7 +1292,7 @@ def test_failed_multi_step_patch_change_move_rolls_back_all_stack_operations(
     repository = StGitRepository(tmp_path)
     original_series = _run(tmp_path, environment, "stg", "series", "--all")
     original_head = _run(tmp_path, environment, "git", "rev-parse", "HEAD")
-    run = repository._run
+    run = repository.commands.run
     fail_push = True
 
     def fail_before_push(
@@ -1449,7 +1312,7 @@ def test_failed_multi_step_patch_change_move_rolls_back_all_stack_operations(
             input_text=input_text,
         )
 
-    monkeypatch.setattr(repository, "_run", fail_before_push)
+    monkeypatch.setattr(repository.commands, "run", fail_before_push)
     with pytest.raises(RepositoryError, match="Injected push failure"):
         repository.move_patch_change(
             "first",
@@ -1475,7 +1338,7 @@ def test_undo_conflicted_multi_step_patch_change_move_restores_stash(
     repository = StGitRepository(tmp_path)
     original_series = _run(tmp_path, environment, "stg", "series", "--all")
     (tmp_path / "local-untracked.txt").write_text("preserved\n", encoding="utf-8")
-    run = repository._run
+    run = repository.commands.run
     injected_conflict = False
 
     def conflict_after_push(
@@ -1508,7 +1371,7 @@ def test_undo_conflicted_multi_step_patch_change_move_restores_stash(
             raise CommandError(("stg", *args), 2, "Injected merge conflict")
         return output
 
-    monkeypatch.setattr(repository, "_run", conflict_after_push)
+    monkeypatch.setattr(repository.commands, "run", conflict_after_push)
     with pytest.raises(CommandError, match="Injected merge conflict"):
         repository.move_patch_change("first", "base.txt", toward_newer=True)
 
@@ -1530,7 +1393,7 @@ def test_undo_conflicted_multi_step_patch_change_move_restores_stash(
 def test_stage_and_unstage_file_preserves_worktree_changes(tmp_path: Path) -> None:
     environment = _git_environment()
     _create_git_repository(tmp_path, environment)
-    repository = StGitRepository(tmp_path)
+    repository = Git(CommandRunner(tmp_path))
     path = "file.txt"
     file_path = tmp_path / path
     file_path.write_text(
@@ -1538,12 +1401,12 @@ def test_stage_and_unstage_file_preserves_worktree_changes(tmp_path: Path) -> No
         encoding="utf-8",
     )
 
-    repository.stage_file(path)
+    repository.stage_files((path,))
     file_path.write_text(
         file_path.read_text(encoding="utf-8") + "unstaged change\n",
         encoding="utf-8",
     )
-    repository.unstage_file(path)
+    repository.unstage_files((path,))
 
     assert not _run(tmp_path, environment, "git", "diff", "--cached")
     worktree_diff = _run(tmp_path, environment, "git", "diff", "--", path)
@@ -1552,9 +1415,9 @@ def test_stage_and_unstage_file_preserves_worktree_changes(tmp_path: Path) -> No
 
     untracked_path = "new file.txt"
     (tmp_path / untracked_path).write_text("new content\n", encoding="utf-8")
-    repository.stage_file(untracked_path)
+    repository.stage_files((untracked_path,))
     assert "+new content" in _run(tmp_path, environment, "git", "diff", "--cached")
-    repository.unstage_file(untracked_path)
+    repository.unstage_files((untracked_path,))
     status = _run(tmp_path, environment, "git", "status", "--short")
     assert any(line.startswith("?? ") for line in status.splitlines())
 
@@ -1563,7 +1426,7 @@ def test_stage_and_unstage_file_preserves_worktree_changes(tmp_path: Path) -> No
 def test_stage_and_unstage_selected_hunk_preserves_sibling_hunks(tmp_path: Path) -> None:
     environment = _git_environment()
     _create_git_repository(tmp_path, environment)
-    repository = StGitRepository(tmp_path)
+    repository = Git(CommandRunner(tmp_path))
     lines = (tmp_path / "file.txt").read_text(encoding="utf-8").splitlines()
     lines[15] = "preexisting staged change"
     (tmp_path / "file.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1598,7 +1461,7 @@ def test_stage_and_unstage_selected_hunk_preserves_sibling_hunks(tmp_path: Path)
 def test_stage_and_unstage_untracked_file_hunk(tmp_path: Path) -> None:
     environment = _git_environment()
     _create_git_repository(tmp_path, environment)
-    repository = StGitRepository(tmp_path)
+    repository = Git(CommandRunner(tmp_path))
     untracked_path = "new file.txt"
     (tmp_path / untracked_path).write_text("new content\n", encoding="utf-8")
 
