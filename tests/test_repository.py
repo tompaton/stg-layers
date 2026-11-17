@@ -185,6 +185,44 @@ def test_unapplied_patch_move_preserves_order_and_application_state(tmp_path: Pa
     )
 
 
+@pytest.mark.parametrize("applied_count", [0, 1])
+@pytest.mark.parametrize("toward_newer", [False, True])
+def test_repeated_unapplied_patch_moves_swap_only_adjacent_patches(
+    tmp_path: Path, applied_count: int, toward_newer: bool
+) -> None:
+    environment = _git_environment()
+    _create_four_patch_stack(tmp_path, environment)
+    _run(tmp_path, environment, "stg", "pop", "-n", str(4 - applied_count))
+    repository = StGitRepository(tmp_path)
+    expected_names = ["first", "second", "third", "fourth"]
+    original_statuses = tuple(patch.status for patch in repository.load_stack())
+    selected = expected_names[applied_count] if toward_newer else "fourth"
+    step = 1 if toward_newer else -1
+
+    for _ in range(3 - applied_count):
+        index = expected_names.index(selected)
+        neighbor = index + step
+        expected_names[index], expected_names[neighbor] = (
+            expected_names[neighbor],
+            expected_names[index],
+        )
+
+        assert repository.move_patch_one_step(selected, toward_newer=toward_newer) == (
+            PatchMoveResult.MOVED
+        )
+        patches = repository.load_stack()
+        assert [patch.name for patch in patches] == expected_names
+        assert tuple(patch.status for patch in patches) == original_statuses
+
+    expected_result = (
+        PatchMoveResult.APPLICATION_BOUNDARY
+        if applied_count and not toward_newer
+        else PatchMoveResult.STACK_EDGE
+    )
+    assert repository.move_patch_one_step(selected, toward_newer=toward_newer) == expected_result
+    assert [patch.name for patch in repository.load_stack()] == expected_names
+
+
 def test_patch_move_stops_at_stack_and_application_boundaries(tmp_path: Path) -> None:
     environment = _git_environment()
     _create_four_patch_stack(tmp_path, environment)
@@ -879,6 +917,45 @@ def test_move_file_to_newer_patch_reapplies_the_stack_and_preserves_local_change
         "untracked local\n"
     )
     assert not _run(tmp_path, environment, "git", "stash", "list")
+
+
+@pytest.mark.skipif(
+    shutil.which("git") is None or shutil.which("stg") is None,
+    reason="Git and StGit are required for integration tests",
+)
+@pytest.mark.parametrize("toward_newer", [False, True])
+@pytest.mark.parametrize("binary", [False, True])
+def test_move_added_file_between_patches(
+    tmp_path: Path, toward_newer: bool, binary: bool
+) -> None:
+    environment = _git_environment()
+    _create_two_patch_stack(tmp_path, environment)
+    source = "first" if toward_newer else "second"
+    target = "second" if toward_newer else "first"
+    if toward_newer:
+        _run(tmp_path, environment, "stg", "pop")
+    path = "new [file].dat"
+    content = b"new file\n" if not binary else b"\x00new file\xff\n"
+    (tmp_path / path).write_bytes(content)
+    _run(tmp_path, environment, "git", "add", "--", path)
+    _run(tmp_path, environment, "stg", "refresh", "--index")
+    if toward_newer:
+        _run(tmp_path, environment, "stg", "push")
+    repository = StGitRepository(tmp_path)
+
+    assert repository.move_patch_change(source, path, toward_newer=toward_newer) == (
+        PatchChangeMoveResult.MOVED,
+        target,
+    )
+
+    patches = {patch.name: patch for patch in repository.load_stack()}
+    assert path not in [file.path for file in patches[source].files]
+    assert path in [file.path for file in patches[target].files]
+    assert (tmp_path / path).read_bytes() == content
+    assert not _run(tmp_path, environment, "git", "status", "--porcelain")
+    _run(tmp_path, environment, "stg", "pop", "--all")
+    _run(tmp_path, environment, "stg", "push", "--all")
+    assert (tmp_path / path).read_bytes() == content
 
 
 @pytest.mark.skipif(

@@ -447,9 +447,17 @@ class StGitRepository:
             return PatchMoveResult.MOVED
 
         if patch_status == PatchStatus.UNAPPLIED and neighbor_status == PatchStatus.UNAPPLIED:
-            start_index = min(patch_index, neighbor_index)
-            reordered_names = patch_names[start_index:]
-            reordered_names[0], reordered_names[1] = reordered_names[1], reordered_names[0]
+            patch_names[patch_index], patch_names[neighbor_index] = (
+                patch_names[neighbor_index],
+                patch_names[patch_index],
+            )
+            # Float prepends to the unapplied group, so include the whole group
+            # to preserve patches before the swapped pair (and exclude hidden patches).
+            reordered_names = [
+                name
+                for name, (_, status, _) in zip(patch_names, series, strict=True)
+                if status == PatchStatus.UNAPPLIED
+            ]
             self._run_stack_operation(
                 "float",
                 "--noapply",
@@ -557,7 +565,7 @@ class StGitRepository:
             if header_end < 0:
                 raise RepositoryError(f"Patch {patch_name!r} has no text diff for {path!r}.")
             selected_diff = selected_diff[:header_end] + hunk.diff_text
-        elif not selected_diff and source_file.status == FileStatus.BINARY:
+        elif not source_file.hunks:
             selected_diff = self._raw_patch_file_diff(patch_name, path)
         if not selected_diff:
             raise RepositoryError(f"Patch {patch_name!r} has no applicable diff for {path!r}.")
@@ -585,7 +593,7 @@ class StGitRepository:
             input_text=selected_diff,
         )
         run_stg("refresh", "--index")
-        self._run("git", "--literal-pathspecs", "restore", "--worktree", "--", path)
+        self._restore_patch_change_worktree(path)
 
         if not toward_newer:
             run_stg("pop", self._patch_ref(source_name))
@@ -597,11 +605,22 @@ class StGitRepository:
                 input_text=selected_diff,
             )
             run_stg("refresh", "--index")
-            self._run("git", "--literal-pathspecs", "restore", "--worktree", "--", path)
+            self._restore_patch_change_worktree(path)
             run_stg("push", self._patch_ref(source_name))
 
         for popped_name in popped_patches:
             run_stg("push", "--set-tree", self._patch_ref(popped_name))
+
+    def _restore_patch_change_worktree(self, path: str) -> None:
+        if self._is_tracked(path):
+            self._run("git", "--literal-pathspecs", "restore", "--worktree", "--", path)
+        else:
+            # Removing an addition from the index leaves its worktree file behind.
+            # Match the index before pushing patches that may add the file again.
+            try:
+                (self.root / path).unlink(missing_ok=True)
+            except OSError as error:
+                raise RepositoryError(f"Could not remove spilled file {path!r}: {error}") from error
 
     def _raw_patch_file_diff(self, patch_name: str, path: str) -> str:
         diff = self._run(
