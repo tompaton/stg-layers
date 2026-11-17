@@ -36,14 +36,25 @@ Selection follows the directory with the Ctrl shortcuts. Enter on a directory
 inside a patch leaves it unchanged. Directory transfers between patches use one
 transaction, so a failure or conflict can roll back the entire group through
 the existing Undo process. Other patches and local changes are preserved.
+On the **Staged changes** or **Unstaged changes** group node, Enter and
+Ctrl+Up/Down operate on every file in the group, including collapsed directories.
+Enter toggles staging; Ctrl follows the displayed direction and can move all
+staged files into the current patch. Empty groups are left unchanged.
 Non-ignored untracked files
 appear as additions in **Unstaged changes**.
 
 Use **Up/Down** to move between visible nodes. **Right** expands a node or moves
-to its first child; **Left** collapses a node or moves to its parent. The preview
+to its first child; on a hunk, Right focuses the diff preview. **Left** collapses
+a node or moves to its parent. The preview
 updates as the highlighted node changes. Press **Tab** to move focus between
 the tree and read-only diff preview. The preview scrolls independently with
 Page Up/Page Down or the mouse wheel.
+While the preview is focused, **n** selects the next hunk and **p** the previous
+hunk in displayed tree order, including hunks inside collapsed files. Focus
+stays in the preview. **w** toggles word wrap, which starts off and keeps its
+setting as you navigate. **Enter** stages or unstages the selected file or hunk;
+selecting a file moves all of its hunks. Patch contents, directories, and group
+nodes are left unchanged by Enter in the preview.
 Horizontal overflow is clipped in the tree to keep its scrollbar out of view.
 
 With the tree focused, **Enter** stages the selected file or hunk under

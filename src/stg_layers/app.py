@@ -400,12 +400,36 @@ class LayerTree(Tree[TreeItem]):
 
     def action_expand_or_child(self) -> None:
         node = self.cursor_node
+        if node is not None and node.data is not None and node.data.hunk_index is not None:
+            self.app.query_one("#diff-view", TextArea).focus()
+            return
         if node is None or not node.allow_expand:
             return
         if not node.is_expanded:
             node.expand()
         elif node.children:
             self.move_cursor(node.children[0], animate=False)
+
+
+class DiffPreview(TextArea):
+    BINDINGS = [
+        Binding("n", "next_hunk", "Next hunk", priority=True),
+        Binding("p", "previous_hunk", "Previous hunk", priority=True),
+        Binding("enter", "apply_change", "Stage/unstage", priority=True),
+        Binding("w", "toggle_word_wrap", "Word wrap", priority=True),
+    ]
+
+    async def action_next_hunk(self) -> None:
+        await self.app.run_action("next_preview_hunk")
+
+    async def action_previous_hunk(self) -> None:
+        await self.app.run_action("previous_preview_hunk")
+
+    async def action_apply_change(self) -> None:
+        await self.app.run_action("apply_preview_change")
+
+    def action_toggle_word_wrap(self) -> None:
+        self.soft_wrap = not self.soft_wrap
 
 
 class StgLayersApp(App[None]):
@@ -475,7 +499,7 @@ class StgLayersApp(App[None]):
                 yield tree
             with Vertical(id="preview-pane"):
                 yield Static("Select a patch, file, or hunk.", id="selection-title", markup=False)
-                preview = TextArea(
+                preview = DiffPreview(
                     "",
                     read_only=True,
                     show_cursor=False,
@@ -773,7 +797,7 @@ class StgLayersApp(App[None]):
             self.query_one("#status", Static).update(f"Error: {error}")
 
     async def action_apply_selected_change(self) -> None:
-        if await self._operate_selected_directory():
+        if await self._operate_selected_file_group():
             return
         tree = self.query_one("#patch-tree", LayerTree)
         node = tree.cursor_node
@@ -835,11 +859,18 @@ class StgLayersApp(App[None]):
             expansion_fallback_path=item.file_path,
         )
 
-    async def _operate_selected_directory(self, *, toward_newer: bool | None = None) -> bool:
+    async def _operate_selected_file_group(self, *, toward_newer: bool | None = None) -> bool:
         tree = self.query_one("#patch-tree", LayerTree)
         node = tree.cursor_node
         item = node.data if node is not None else None
-        if node is None or item is None or item.directory_path is None:
+        if node is None or item is None:
+            return False
+        is_change_group = (
+            item.change_area in {"staged", "unstaged"}
+            and item.file_path is None
+            and item.directory_path is None
+        )
+        if item.directory_path is None and not is_change_group:
             return False
         if toward_newer is None and item.change_area is None:
             return True
@@ -851,9 +882,10 @@ class StgLayersApp(App[None]):
             and child.data.file_path is not None
             and child.data.hunk_index is None
         )
-        self.query_one("#status", Static).update(f"Moving directory {item.directory_path}...")
+        label = item.directory_path or item.title
+        self.query_one("#status", Static).update(f"Moving files in {label}...")
         try:
-            selection = await self._move_directory(item, paths, toward_newer)
+            selection = await self._move_file_group(item, paths, toward_newer)
         except RepositoryError as error:
             await self._handle_stack_operation_error(error)
             return True
@@ -866,9 +898,12 @@ class StgLayersApp(App[None]):
             await self._load_stack(preferred_selection=selection)
         return True
 
-    async def _move_directory(
+    async def _move_file_group(
         self, item: TreeItem, paths: tuple[str, ...], toward_newer: bool | None
     ) -> TreeItem | None:
+        if not paths:
+            self.query_one("#status", Static).update("No files to move in this group.")
+            return None
         if item.patch_name is not None:
             return await self._move_patch_directory(item, paths, bool(toward_newer))
         if item.change_area == "unstaged":
@@ -911,7 +946,7 @@ class StgLayersApp(App[None]):
         return replace(item, patch_name=target)
 
     async def action_move_change_down(self) -> None:
-        if await self._operate_selected_directory(toward_newer=not self.newest_first):
+        if await self._operate_selected_file_group(toward_newer=not self.newest_first):
             return
         if await self._reorder_selected_patch(toward_newer=not self.newest_first):
             return
@@ -923,7 +958,7 @@ class StgLayersApp(App[None]):
             await self.action_spill_current_patch_file()
 
     async def action_move_change_up(self) -> None:
-        if await self._operate_selected_directory(toward_newer=self.newest_first):
+        if await self._operate_selected_file_group(toward_newer=self.newest_first):
             return
         if await self._reorder_selected_patch(toward_newer=self.newest_first):
             return
@@ -1283,6 +1318,41 @@ class StgLayersApp(App[None]):
     @on(Tree.NodeHighlighted)
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted[TreeItem]) -> None:
         self._show_tree_item(event.node.data)
+
+    def action_next_preview_hunk(self) -> None:
+        self._navigate_preview_hunk(forward=True)
+
+    def action_previous_preview_hunk(self) -> None:
+        self._navigate_preview_hunk(forward=False)
+
+    def _navigate_preview_hunk(self, *, forward: bool) -> None:
+        tree = self.query_one("#patch-tree", LayerTree)
+        nodes = self._tree_nodes(tree.root)
+        current = tree.cursor_node
+        index = nodes.index(current) if current in nodes else (-1 if forward else len(nodes))
+        candidates = nodes[index + 1 :] if forward else reversed(nodes[:index])
+        selected = next(
+            (
+                node for node in candidates
+                if node.data is not None and node.data.hunk_index is not None
+            ),
+            None,
+        )
+        if selected is None:
+            return
+        ancestor = selected.parent
+        while ancestor is not None:
+            ancestor.expand()
+            ancestor = ancestor.parent
+        # Rebuild the visible tree before moving to a previously collapsed hunk.
+        self.call_after_refresh(self._restore_tree_selection, tree, selected)
+
+    async def action_apply_preview_change(self) -> None:
+        tree = self.query_one("#patch-tree", LayerTree)
+        item = tree.cursor_node.data if tree.cursor_node is not None else None
+        if item is None or item.file_path is None:
+            return
+        await self.action_apply_selected_change()
 
     def _show_tree_item(self, item: TreeItem | None) -> None:
         if item is None:

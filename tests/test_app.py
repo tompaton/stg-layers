@@ -386,6 +386,238 @@ class PatchChangeFixtureRepository(FixtureRepository):
 
 
 @pytest.mark.parametrize("reversed_order", [False, True])
+def test_preview_navigates_hunks_across_collapsed_files(reversed_order: bool) -> None:
+    async def run_app() -> None:
+        repository = FixtureRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            preview = app.query_one("#diff-view", TextArea)
+            if reversed_order:
+                app.action_toggle_order()
+                await pilot.pause()
+            hunks = [
+                node for node in app._tree_nodes(tree.root)
+                if node.data is not None and node.data.hunk_index is not None
+            ]
+            tree.move_cursor(tree.root)
+            preview.focus()
+            for hunk in hunks:
+                await pilot.press("n")
+                await pilot.pause()
+                assert tree.cursor_node is hunk
+                assert hunk.parent is not None and hunk.parent.is_expanded
+                assert preview.has_focus
+                assert hunk.data is not None and preview.text == hunk.data.diff_text
+            await pilot.press("n")
+            assert tree.cursor_node is hunks[-1]
+            for hunk in reversed(hunks[:-1]):
+                await pilot.press("p")
+                await pilot.pause()
+                assert tree.cursor_node is hunk
+                assert preview.has_focus
+                assert hunk.data is not None and preview.text == hunk.data.diff_text
+            await pilot.press("p")
+            assert tree.cursor_node is hunks[0]
+            assert not repository.created_messages
+            assert not repository.patch_pushes
+
+            patch_hunk = next(hunk for hunk in hunks if hunk.data and hunk.data.patch_name)
+            tree.move_cursor(patch_hunk)
+            await pilot.pause()
+            await pilot.press("enter")
+            assert repository.actions == []
+
+    asyncio.run(run_app())
+
+
+def test_preview_enter_stages_and_unstages_only_the_selected_hunk() -> None:
+    async def run_app() -> None:
+        hunk_one = PatchChangeFixtureRepository._hunk(1, "old one", "new one")
+        hunk_two = PatchChangeFixtureRepository._hunk(20, "old two", "new two")
+        repository = MutableFixtureRepository(unstaged=(
+            MutableFixtureRepository._file_with_hunks("src/shared.py", (hunk_one, hunk_two)),
+            FixtureRepository()._file_change("tests/other.py", "old", "new"),
+        ))
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            preview = app.query_one("#diff-view", TextArea)
+            file = next(
+                node for node in app._tree_nodes(tree.root)
+                if node.data is not None and node.data.file_path == "src/shared.py"
+                and node.data.hunk_index is None
+            )
+            tree.move_cursor(file)
+            preview.focus()
+            await pilot.press("n")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert repository.actions == [("stage_hunk", "src/shared.py", 0)]
+            assert repository.staged[0].hunks[0].diff_text == hunk_one.diff_text
+            assert repository.unstaged[0].hunks[0].diff_text == hunk_two.diff_text
+            assert preview.has_focus
+            assert preview.text == hunk_two.diff_text
+            await pilot.press("enter")
+            await pilot.pause()
+            assert len(repository.staged[0].hunks) == 2
+            assert [file.path for file in repository.unstaged] == ["tests/other.py"]
+            assert preview.has_focus
+
+            staged_hunk = next(
+                node for node in app._tree_nodes(tree.root)
+                if node.data is not None and node.data.change_area == "staged"
+                and node.data.hunk_index == 0
+            )
+            assert staged_hunk.parent is not None
+            staged_hunk.parent.expand()
+            await pilot.pause()
+            tree.move_cursor(staged_hunk)
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert repository.actions[-1] == ("unstage_hunk", "src/shared.py", 0)
+            assert len(repository.staged[0].hunks) == 1
+            assert preview.has_focus
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("stage", [False, True])
+def test_preview_enter_operates_on_the_whole_selected_file(stage: bool) -> None:
+    async def run_app() -> None:
+        selected = MutableFixtureRepository._file_with_hunks("src/selected.py", (
+            PatchChangeFixtureRepository._hunk(1, "old one", "new one"),
+            PatchChangeFixtureRepository._hunk(20, "old two", "new two"),
+        ))
+        sibling = FixtureRepository()._file_change("tests/other.py", "old", "new")
+        files = (selected, sibling)
+        repository = MutableFixtureRepository(
+            unstaged=files if stage else (), staged=() if stage else files
+        )
+        source, target = ("unstaged", "staged") if stage else ("staged", "unstaged")
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            preview = app.query_one("#diff-view", TextArea)
+            group = next(
+                node for node in tree.root.children
+                if node.data and node.data.change_area == source
+            )
+            preview.focus()
+            for node in (group, group.children[0]):
+                tree.move_cursor(node)
+                await pilot.press("enter")
+                assert repository.actions == []
+            file = group.children[0].children[0]
+            tree.move_cursor(file)
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            verb = "stage_file" if stage else "unstage_file"
+            assert repository.actions == [(verb, "src/selected.py", None)]
+            assert getattr(repository, source) == [sibling]
+            assert getattr(repository, target) == [selected]
+            assert preview.has_focus
+
+    asyncio.run(run_app())
+
+
+def test_right_on_a_hunk_focuses_the_diff_preview() -> None:
+    async def run_app() -> None:
+        app = StgLayersApp(FixtureRepository())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            preview = app.query_one("#diff-view", TextArea)
+            hunks = [
+                node for node in app._tree_nodes(tree.root)
+                if node.data is not None and node.data.hunk_index is not None
+            ]
+            for hunk in hunks:
+                assert hunk.parent is not None
+                hunk.parent.expand()
+                await pilot.pause()
+                tree.focus()
+                tree.move_cursor(hunk)
+                await pilot.pause()
+                await pilot.press("right")
+                assert preview.has_focus
+                assert tree.cursor_node is hunk
+                assert hunk.data is not None and preview.text == hunk.data.diff_text
+                await pilot.press("tab")
+                assert tree.has_focus
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("reversed_order", [False, True])
+def test_change_group_actions_move_all_files(reversed_order: bool) -> None:
+    async def run_app() -> None:
+        paths = ("root.txt", "dir/one.txt", "dir/nested/two.txt")
+        fixture = FixtureRepository()
+        repository = MutableFixtureRepository(
+            unstaged=tuple(fixture._file_change(path, "old", "new") for path in paths)
+        )
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.focus()
+            if reversed_order:
+                await pilot.press("shift+r")
+                await pilot.pause()
+            older = "ctrl+up" if reversed_order else "ctrl+down"
+            newer = "ctrl+down" if reversed_order else "ctrl+up"
+
+            def select_group(area: str) -> None:
+                group = next(
+                    node for node in tree.root.children
+                    if node.data is not None and node.data.change_area == area
+                )
+                group.collapse()
+                tree.move_cursor(group)
+
+            select_group("staged")
+            await pilot.press("enter", older)
+            assert repository.moved_files == []
+            assert repository.actions == []
+
+            for key, source, target in (
+                ("enter", "unstaged", "staged"),
+                ("enter", "staged", "unstaged"),
+                (older, "unstaged", "staged"),
+                (newer, "staged", "unstaged"),
+                (older, "unstaged", "staged"),
+            ):
+                select_group(source)
+                await pilot.press(key)
+                await pilot.pause()
+                assert {file.path for file in getattr(repository, target)} == set(paths)
+                assert not getattr(repository, source)
+                selected = tree.cursor_node
+                assert selected is not None and selected.data is not None
+                assert selected.data.change_area == (source if key == "enter" else target)
+
+            select_group("staged")
+            await pilot.press(older)
+            await pilot.pause()
+            assert repository.moved_files == list(paths)
+            assert not repository.staged
+            assert set(paths) <= {file.path for file in repository.patch_files}
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.patch_name == "types [notes]"
+            assert selected.data.file_path is None
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("reversed_order", [False, True])
 def test_directory_actions_include_descendants_and_follow_selection(reversed_order: bool) -> None:
     async def run_app() -> None:
         fixture = FixtureRepository()
@@ -699,6 +931,33 @@ def test_app_renders_patch_file_hunk_tree() -> None:
             await pilot.pause()
             assert file_node.is_expanded
             assert tree.cursor_node is file_node
+
+    asyncio.run(run_app())
+
+
+def test_preview_word_wrap_toggle_persists_across_hunk_navigation() -> None:
+    async def run_app() -> None:
+        app = StgLayersApp(FixtureRepository())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            preview = app.query_one("#diff-view", TextArea)
+            tree.move_cursor(tree.root)
+            preview.focus()
+            assert not preview.soft_wrap
+            text = preview.text
+            await pilot.press("w")
+            assert preview.soft_wrap
+            assert preview.text == text
+            assert preview.has_focus
+            await pilot.press("n")
+            await pilot.pause()
+            assert preview.soft_wrap
+            text = preview.text
+            await pilot.press("w")
+            assert not preview.soft_wrap
+            assert preview.text == text
+            assert preview.has_focus
 
     asyncio.run(run_app())
 
