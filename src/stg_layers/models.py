@@ -59,3 +59,4 @@ class TreeItem:
     hunk_index: int | None = None
     hunk_key: str | None = None
     change_area: str | None = None
+    directory_path: str | None = None

@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from rich.style import Style
@@ -17,11 +18,7 @@ from tree_sitter_diff import HIGHLIGHTS_QUERY
 from tree_sitter_diff import language as diff_language
 
 from stg_layers.models import FileChange, FileStatus, Patch, PatchStatus, TreeItem
-from stg_layers.repository import (
-    PatchChangeMoveResult,
-    PatchMoveResult,
-    RepositoryError,
-)
+from stg_layers.repository import PatchChangeMoveResult, PatchMoveResult, RepositoryError
 
 _DIFF_THEME = TextAreaTheme(
     name="stg-diff",
@@ -54,6 +51,12 @@ _FILE_STATUS_STYLES = {
 }
 
 
+@dataclass
+class _FileDirectory:
+    files: list[FileChange] = field(default_factory=list)
+    directories: dict[str, "_FileDirectory"] = field(default_factory=dict)
+
+
 class StackReader(Protocol):
     branch: str | None
 
@@ -68,6 +71,18 @@ class StackReader(Protocol):
     def stage_file(self, path: str) -> None: ...
 
     def unstage_file(self, path: str) -> None: ...
+
+    def stage_files(self, paths: tuple[str, ...]) -> None: ...
+
+    def unstage_files(self, paths: tuple[str, ...]) -> None: ...
+
+    def refresh_staged_files_to_current_patch(self, paths: tuple[str, ...]) -> None: ...
+
+    def spill_current_patch_files(self, paths: tuple[str, ...]) -> None: ...
+
+    def move_patch_changes(
+        self, patch_name: str, paths: tuple[str, ...], *, toward_newer: bool
+    ) -> tuple[PatchChangeMoveResult, str | None]: ...
 
     def stage_hunk(self, path: str, hunk_index: int) -> None: ...
 
@@ -504,7 +519,12 @@ class StgLayersApp(App[None]):
         tree = self.query_one("#patch-tree", LayerTree)
         node = tree.cursor_node
         item = node.data if node is not None else None
-        if item is None or item.patch_name is None or item.file_path is not None:
+        if (
+            item is None
+            or item.patch_name is None
+            or item.file_path is not None
+            or item.directory_path is not None
+        ):
             return
 
         patch_name = item.patch_name
@@ -611,9 +631,7 @@ class StgLayersApp(App[None]):
             if resolution == "undo":
                 await asyncio.to_thread(self.repository.undo_stack_operation)
             else:
-                retained_stash = await asyncio.to_thread(
-                    self.repository.refresh_stack_operation
-                )
+                retained_stash = await asyncio.to_thread(self.repository.refresh_stack_operation)
         except RepositoryError as error:
             self.query_one("#status", Static).update(f"Error: {error}")
             try:
@@ -645,6 +663,7 @@ class StgLayersApp(App[None]):
             item is None
             or item.patch_name is None
             or item.file_path is not None
+            or item.directory_path is not None
             or item.hunk_index is not None
             or self._loaded_data is None
         ):
@@ -657,16 +676,12 @@ class StgLayersApp(App[None]):
         if patch is None:
             return
         valid_statuses = (
-            {PatchStatus.UNAPPLIED}
-            if push
-            else {PatchStatus.APPLIED, PatchStatus.CURRENT}
+            {PatchStatus.UNAPPLIED} if push else {PatchStatus.APPLIED, PatchStatus.CURRENT}
         )
         if patch.status not in valid_statuses:
             expected = "unapplied" if push else "applied"
             verb = "push" if push else "pop"
-            self.query_one("#status", Static).update(
-                f"Select an {expected} patch to {verb}."
-            )
+            self.query_one("#status", Static).update(f"Select an {expected} patch to {verb}.")
             return
         if not await self._ensure_repository_ready():
             return
@@ -702,7 +717,12 @@ class StgLayersApp(App[None]):
         tree = self.query_one("#patch-tree", LayerTree)
         node = tree.cursor_node
         item = node.data if node is not None else None
-        if item is None or item.patch_name is None or item.file_path is not None:
+        if (
+            item is None
+            or item.patch_name is None
+            or item.file_path is not None
+            or item.directory_path is not None
+        ):
             self.query_one("#status", Static).update(f"Select a patch to {operation}.")
             return
         if not await self._ensure_repository_ready():
@@ -753,6 +773,8 @@ class StgLayersApp(App[None]):
             self.query_one("#status", Static).update(f"Error: {error}")
 
     async def action_apply_selected_change(self) -> None:
+        if await self._operate_selected_directory():
+            return
         tree = self.query_one("#patch-tree", LayerTree)
         node = tree.cursor_node
         item = node.data if node is not None else None
@@ -792,14 +814,14 @@ class StgLayersApp(App[None]):
         except RepositoryError as error:
             self.query_one("#status", Static).update(f"Error: {error}")
             return
-        current_patch = next(
-            (
-                patch
-                for patch in self._loaded_data[0]
-                if patch.status == PatchStatus.CURRENT
-            ),
-            None,
-        ) if self._loaded_data is not None else None
+        current_patch = (
+            next(
+                (patch for patch in self._loaded_data[0] if patch.status == PatchStatus.CURRENT),
+                None,
+            )
+            if self._loaded_data is not None
+            else None
+        )
         if current_patch is None:
             await self._load_stack()
             return
@@ -813,7 +835,84 @@ class StgLayersApp(App[None]):
             expansion_fallback_path=item.file_path,
         )
 
+    async def _operate_selected_directory(self, *, toward_newer: bool | None = None) -> bool:
+        tree = self.query_one("#patch-tree", LayerTree)
+        node = tree.cursor_node
+        item = node.data if node is not None else None
+        if node is None or item is None or item.directory_path is None:
+            return False
+        if toward_newer is None and item.change_area is None:
+            return True
+        if not await self._ensure_repository_ready():
+            return True
+        paths = tuple(
+            child.data.file_path for child in self._tree_nodes(node)
+            if child.data is not None
+            and child.data.file_path is not None
+            and child.data.hunk_index is None
+        )
+        self.query_one("#status", Static).update(f"Moving directory {item.directory_path}...")
+        try:
+            selection = await self._move_directory(item, paths, toward_newer)
+        except RepositoryError as error:
+            await self._handle_stack_operation_error(error)
+            return True
+        if selection is not None:
+            if toward_newer is None:
+                selection = TreeItem(
+                    title=f"{item.change_area.title()} changes" if item.change_area else "",
+                    diff_text="", change_area=item.change_area,
+                )
+            await self._load_stack(preferred_selection=selection)
+        return True
+
+    async def _move_directory(
+        self, item: TreeItem, paths: tuple[str, ...], toward_newer: bool | None
+    ) -> TreeItem | None:
+        if item.patch_name is not None:
+            return await self._move_patch_directory(item, paths, bool(toward_newer))
+        if item.change_area == "unstaged":
+            if toward_newer:
+                self.query_one("#status", Static).update("Unstaged changes are at the edge.")
+                return None
+            await asyncio.to_thread(self.repository.stage_files, paths)
+            return replace(item, change_area="staged")
+        if toward_newer is None or toward_newer:
+            await asyncio.to_thread(self.repository.unstage_files, paths)
+            return replace(item, change_area="unstaged")
+        current = next(
+            (patch for patch in self._loaded_data[0] if patch.status == PatchStatus.CURRENT), None
+        ) if self._loaded_data is not None else None
+        if current is None:
+            self.query_one("#status", Static).update("There is no current patch to refresh.")
+            return None
+        await asyncio.to_thread(self.repository.refresh_staged_files_to_current_patch, paths)
+        return replace(item, change_area=None, patch_name=current.name)
+
+    async def _move_patch_directory(
+        self, item: TreeItem, paths: tuple[str, ...], toward_newer: bool
+    ) -> TreeItem | None:
+        patch = next(
+            (patch for patch in self._loaded_data[0] if patch.name == item.patch_name), None
+        ) if self._loaded_data is not None else None
+        if patch is None:
+            return None
+        if patch.status == PatchStatus.CURRENT and toward_newer:
+            await asyncio.to_thread(self.repository.spill_current_patch_files, paths)
+            return replace(item, patch_name=None, change_area="staged")
+        result, target = await asyncio.to_thread(
+            self.repository.move_patch_changes, patch.name, paths, toward_newer=toward_newer
+        )
+        if result != PatchChangeMoveResult.MOVED:
+            self._show_patch_change_move_result(
+                result, patch.status, patch.name, toward_newer, False
+            )
+            return None
+        return replace(item, patch_name=target)
+
     async def action_move_change_down(self) -> None:
+        if await self._operate_selected_directory(toward_newer=not self.newest_first):
+            return
         if await self._reorder_selected_patch(toward_newer=not self.newest_first):
             return
         if await self._move_selected_patch_change(toward_newer=not self.newest_first):
@@ -824,6 +923,8 @@ class StgLayersApp(App[None]):
             await self.action_spill_current_patch_file()
 
     async def action_move_change_up(self) -> None:
+        if await self._operate_selected_directory(toward_newer=self.newest_first):
+            return
         if await self._reorder_selected_patch(toward_newer=self.newest_first):
             return
         if await self._move_selected_patch_change(toward_newer=self.newest_first):
@@ -858,8 +959,7 @@ class StgLayersApp(App[None]):
         change_name = "hunk" if item.hunk_index is not None else "file"
         direction = "newer" if toward_newer else "older"
         self.query_one("#status", Static).update(
-            f"Moving {change_name} {item.file_path} {direction} from "
-            f"patch {item.patch_name}..."
+            f"Moving {change_name} {item.file_path} {direction} from patch {item.patch_name}..."
         )
         try:
             result, moved_to = await asyncio.to_thread(
@@ -929,6 +1029,7 @@ class StgLayersApp(App[None]):
             item is None
             or item.patch_name is None
             or item.file_path is not None
+            or item.directory_path is not None
             or item.hunk_index is not None
         ):
             return False
@@ -1021,25 +1122,17 @@ class StgLayersApp(App[None]):
         item = node.data if node is not None else None
         expected_area = "unstaged" if stage else "staged"
         target_area = "staged" if stage else "unstaged"
-        if (
-            item is None
-            or item.change_area != expected_area
-            or item.file_path is None
-        ):
+        if item is None or item.change_area != expected_area or item.file_path is None:
             return
         if not await self._ensure_repository_ready():
             return
 
         next_selection = (
-            self._next_change_selection(node, item)
-            if advance and node is not None
-            else None
+            self._next_change_selection(node, item) if advance and node is not None else None
         )
         verb = "Staging" if stage else "Unstaging"
         target = "hunk" if item.hunk_index is not None else "file"
-        self.query_one("#status", Static).update(
-            f"{verb} {target} {item.file_path}..."
-        )
+        self.query_one("#status", Static).update(f"{verb} {target} {item.file_path}...")
         try:
             if item.hunk_index is None:
                 operation = self.repository.stage_file if stage else self.repository.unstage_file
@@ -1070,11 +1163,9 @@ class StgLayersApp(App[None]):
         )
         await self._load_stack(
             preferred_selection=preferred_selection,
-            expansion_fallback_path=item.file_path if not advance else (
-                item.file_path
-                if preferred_selection.file_path == item.file_path
-                else None
-            ),
+            expansion_fallback_path=item.file_path
+            if not advance
+            else (item.file_path if preferred_selection.file_path == item.file_path else None),
         )
 
     @classmethod
@@ -1101,7 +1192,7 @@ class StgLayersApp(App[None]):
             group_node = node.parent
 
         if file_node is not None and group_node is not None:
-            siblings = tuple(group_node.children)
+            siblings = cls._change_group_files(group_node)
             next_file = cls._next_sibling_file(file_node, siblings)
             if next_file is not None and next_file.data is not None:
                 return next_file.data
@@ -1113,6 +1204,20 @@ class StgLayersApp(App[None]):
             title=f"{item.change_area.title()} changes" if item.change_area else "",
             diff_text="",
             change_area=item.change_area,
+        )
+
+    @classmethod
+    def _change_group_files(cls, node: TreeNode[TreeItem]) -> tuple[TreeNode[TreeItem], ...]:
+        while node.data is not None and node.data.directory_path is not None:
+            if node.parent is None:
+                break
+            node = node.parent
+        return tuple(
+            child
+            for child in cls._tree_nodes(node)
+            if child.data is not None
+            and child.data.file_path is not None
+            and child.data.hunk_index is None
         )
 
     @classmethod
@@ -1189,18 +1294,15 @@ class StgLayersApp(App[None]):
     @staticmethod
     def _tree_item_key(item: TreeItem) -> tuple[str | None, ...]:
         if (
-            any((item.change_area, item.patch_name, item.file_path))
+            any((item.change_area, item.patch_name, item.file_path, item.directory_path))
             or item.hunk_index is not None
         ):
             return (
                 item.change_area,
                 item.patch_name,
                 item.file_path,
-                (
-                    item.hunk_key or str(item.hunk_index)
-                    if item.hunk_index is not None
-                    else None
-                ),
+                item.directory_path,
+                (item.hunk_key or str(item.hunk_index) if item.hunk_index is not None else None),
             )
         return (item.title,)
 
@@ -1216,11 +1318,11 @@ class StgLayersApp(App[None]):
     @staticmethod
     def _tree_nodes(root: TreeNode[TreeItem]) -> list[TreeNode[TreeItem]]:
         nodes: list[TreeNode[TreeItem]] = []
-        pending = list(root.children)
+        pending = list(reversed(root.children))
         while pending:
             node = pending.pop()
             nodes.append(node)
-            pending.extend(node.children)
+            pending.extend(reversed(node.children))
         return nodes
 
     async def _load_stack(
@@ -1316,9 +1418,7 @@ class StgLayersApp(App[None]):
         selected_node = self._find_selection_node(nodes, selection)
         if selected_node is None and nodes:
             selected_node = nodes[0]
-        should_restore_selection = (
-            preferred_selection is not None or previous_selection is not None
-        )
+        should_restore_selection = preferred_selection is not None or previous_selection is not None
         if selected_node is not None and should_restore_selection:
             self.call_after_refresh(
                 self._restore_tree_state,
@@ -1453,6 +1553,11 @@ class StgLayersApp(App[None]):
         self.call_after_refresh(self._restore_tree_selection, tree, node)
 
     def _restore_tree_selection(self, tree: LayerTree, node: TreeNode[TreeItem]) -> None:
+        ancestor = node.parent
+        while ancestor is not None:
+            if ancestor.data is not None and ancestor.data.directory_path is not None:
+                ancestor.expand()
+            ancestor = ancestor.parent
         tree.move_cursor(node, animate=False)
         self._show_tree_item(node.data)
 
@@ -1473,8 +1578,7 @@ class StgLayersApp(App[None]):
             group.add(f"No {change_area} changes.", allow_expand=False)
             return
 
-        for file in files:
-            StgLayersApp._add_file(group, file, None, change_area)
+        StgLayersApp._add_grouped_files(group, files, None, change_area)
 
     @staticmethod
     def _add_patch(parent: TreeNode[TreeItem], patch: Patch) -> None:
@@ -1497,8 +1601,50 @@ class StgLayersApp(App[None]):
             patch_node.add("(empty patch)", allow_expand=False)
             return
 
-        for file in patch.files:
-            StgLayersApp._add_file(patch_node, file, patch.name, None)
+        StgLayersApp._add_grouped_files(patch_node, patch.files, patch.name, None)
+
+    @staticmethod
+    def _add_grouped_files(
+        parent: TreeNode[TreeItem],
+        files: tuple[FileChange, ...],
+        patch_name: str | None,
+        change_area: str | None,
+    ) -> None:
+        root = _FileDirectory()
+        for file in files:
+            directory = root
+            for component in file.path.split("/")[:-1]:
+                directory = directory.directories.setdefault(component, _FileDirectory())
+            directory.files.append(file)
+        StgLayersApp._add_directory_contents(parent, root, "", patch_name, change_area)
+
+    @staticmethod
+    def _add_directory_contents(
+        parent: TreeNode[TreeItem],
+        directory: _FileDirectory,
+        prefix: str,
+        patch_name: str | None,
+        change_area: str | None,
+    ) -> None:
+        for file in directory.files:
+            StgLayersApp._add_file(parent, file, patch_name, change_area)
+        for name, child in sorted(directory.directories.items()):
+            while not child.files and len(child.directories) == 1:
+                component, child = next(iter(child.directories.items()))
+                name = f"{name}/{component}"
+            path = f"{prefix}/{name}" if prefix else name
+            node = parent.add(
+                Text(name, style="white"),
+                data=TreeItem(
+                    title=f"{patch_name or change_area} / {path}/",
+                    diff_text="",
+                    patch_name=patch_name,
+                    change_area=change_area,
+                    directory_path=path,
+                ),
+                expand=True,
+            )
+            StgLayersApp._add_directory_contents(node, child, path, patch_name, change_area)
 
     @staticmethod
     def _add_file(
@@ -1507,9 +1653,11 @@ class StgLayersApp(App[None]):
         patch_name: str | None,
         change_area: str | None,
     ) -> None:
-        display_path = file.path
+        display_path = file.path.rsplit("/", 1)[-1]
+        full_display_path = file.path
         if file.status == FileStatus.RENAMED:
             display_path = f"{file.source_path} -> {file.target_path}"
+            full_display_path = display_path
         if patch_name is None:
             if change_area is None:
                 raise ValueError("A file must belong to a patch or change area.")
@@ -1522,7 +1670,7 @@ class StgLayersApp(App[None]):
         file_node = parent.add(
             label,
             data=TreeItem(
-                title=f"{section} / {display_path}",
+                title=f"{section} / {full_display_path}",
                 diff_text=file.diff_text,
                 patch_name=patch_name,
                 file_path=file.path,
@@ -1535,7 +1683,7 @@ class StgLayersApp(App[None]):
             file_node.add(
                 Text(hunk.header, style="yellow"),
                 data=TreeItem(
-                    title=f"{section} / {display_path} / hunk {hunk.index + 1}",
+                    title=f"{section} / {full_display_path} / hunk {hunk.index + 1}",
                     diff_text=hunk.diff_text,
                     patch_name=patch_name,
                     file_path=file.path,

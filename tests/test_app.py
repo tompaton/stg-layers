@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import replace
 
+import pytest
 from rich.text import Text
 from textual.widgets import Static, TextArea, Tree
 
@@ -77,6 +78,32 @@ class FixtureRepository:
 
     def unstage_file(self, path: str) -> None:
         self.actions.append(("unstage_file", path, None))
+
+    def stage_files(self, paths: tuple[str, ...]) -> None:
+        for path in paths:
+            self.stage_file(path)
+
+    def unstage_files(self, paths: tuple[str, ...]) -> None:
+        for path in paths:
+            self.unstage_file(path)
+
+    def refresh_staged_files_to_current_patch(self, paths: tuple[str, ...]) -> None:
+        for path in paths:
+            self.refresh_staged_file_to_current_patch(path)
+
+    def spill_current_patch_files(self, paths: tuple[str, ...]) -> None:
+        for path in paths:
+            self.spill_current_patch_file(path)
+
+    def move_patch_changes(
+        self, patch_name: str, paths: tuple[str, ...], *, toward_newer: bool
+    ) -> tuple[PatchChangeMoveResult, str | None]:
+        result, target = PatchChangeMoveResult.STACK_EDGE, None
+        for path in paths:
+            result, target = self.move_patch_change(patch_name, path, toward_newer=toward_newer)
+            if result != PatchChangeMoveResult.MOVED:
+                break
+        return result, target
 
     def stage_hunk(self, path: str, hunk_index: int) -> None:
         self.actions.append(("stage_hunk", path, hunk_index))
@@ -356,6 +383,221 @@ class PatchChangeFixtureRepository(FixtureRepository):
             else:
                 target_files[target_index] = moved_file
         return PatchChangeMoveResult.MOVED, target_name
+
+
+@pytest.mark.parametrize("reversed_order", [False, True])
+def test_directory_actions_include_descendants_and_follow_selection(reversed_order: bool) -> None:
+    async def run_app() -> None:
+        fixture = FixtureRepository()
+        paths = ("dir/root.txt", "dir/nested/one.txt", "dir/nested/deep/two.txt")
+        repository = MutableFixtureRepository(
+            unstaged=tuple(fixture._file_change(path, "old", "new") for path in (
+                *paths, "dir-other/outside.txt"
+            )),
+            staged=(fixture._file_change("other/staged.txt", "old", "new"),),
+        )
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.focus()
+            if reversed_order:
+                await pilot.press("shift+r")
+                await pilot.pause()
+            older = "ctrl+up" if reversed_order else "ctrl+down"
+            newer = "ctrl+down" if reversed_order else "ctrl+up"
+            directory = next(
+                node for node in app._tree_nodes(tree.root)
+                if node.data is not None and node.data.directory_path == "dir"
+                and node.data.change_area == "unstaged"
+            )
+            tree.move_cursor(directory)
+            for key, area, patch_name in (
+                (older, "staged", None),
+                (older, None, "types [notes]"),
+                (newer, "staged", None),
+                (newer, "unstaged", None),
+            ):
+                assert tree.cursor_node is not None
+                tree.cursor_node.collapse()
+                await pilot.press(key)
+                await pilot.pause()
+                selected = tree.cursor_node
+                assert selected is not None and selected.data is not None
+                assert selected.data.directory_path == "dir"
+                assert selected.data.change_area == area
+                assert selected.data.patch_name == patch_name
+            assert repository.moved_files == list(paths)
+            assert repository.spilled_files == list(paths)
+            assert {file.path for file in repository.staged} == {"other/staged.txt"}
+            assert {file.path for file in repository.unstaged} == {*paths, "dir-other/outside.txt"}
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert {file.path for file in repository.unstaged} == {"dir-other/outside.txt"}
+            staged_directory = next(
+                node for node in app._tree_nodes(tree.root)
+                if node.data is not None and node.data.directory_path == "dir"
+                and node.data.change_area == "staged"
+            )
+            tree.move_cursor(staged_directory)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert {file.path for file in repository.staged} == {"other/staged.txt"}
+            assert {file.path for file in repository.unstaged} == {*paths, "dir-other/outside.txt"}
+
+    asyncio.run(run_app())
+
+
+def test_directory_moves_between_patches() -> None:
+    async def run_app() -> None:
+        repository = PatchChangeFixtureRepository()
+        fixture = FixtureRepository()
+        paths = ("dir/first.txt", "dir/nested/second.txt")
+        repository.patch_files["older"] = [
+            fixture._file_change(path, "old", "new") for path in paths
+        ]
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            directory = next(
+                node for node in app._tree_nodes(tree.root)
+                if node.data is not None and node.data.directory_path == "dir"
+            )
+            tree.focus()
+            tree.move_cursor(directory)
+            for key, target in (("ctrl+up", "current"), ("ctrl+down", "older")):
+                await pilot.press(key)
+                await pilot.pause()
+                selected = tree.cursor_node
+                assert selected is not None and selected.data is not None
+                assert selected.data.directory_path == "dir"
+                assert selected.data.patch_name == target
+                assert {file.path for file in repository.patch_files[target]} == set(paths)
+
+    asyncio.run(run_app())
+
+
+def test_directory_grouping_compacts_single_directory_chains() -> None:
+    fixture = FixtureRepository()
+    paths = (
+        "README.md",
+        "src/stg_layers/app.py",
+        "src/stg_layers/models.py",
+        "tests/test_app.py",
+        "pkg/root.txt",
+        "pkg/nested/deep/file.txt",
+        "branches/left/file.txt",
+        "branches/right/file.txt",
+    )
+    files = tuple(fixture._file_change(path, "old", "new") for path in paths)
+    tree = Tree("root")
+    StgLayersApp._add_change_group(tree.root, "Staged changes", "staged", files)
+    StgLayersApp._add_change_group(tree.root, "Unstaged changes", "unstaged", files)
+    StgLayersApp._add_patch(tree.root, Patch("patch", PatchStatus.CURRENT, "", files))
+
+    for group in tree.root.children:
+        assert [str(node.label) for node in group.children] == [
+            "README.md [modified]", "branches", "pkg", "src/stg_layers", "tests"
+        ]
+        branches, pkg, src, tests = group.children[1:]
+        assert [str(node.label) for node in branches.children] == ["left", "right"]
+        assert [str(node.label) for node in pkg.children] == [
+            "root.txt [modified]", "nested/deep"
+        ]
+        assert [str(node.label) for node in src.children] == [
+            "app.py [modified]", "models.py [modified]"
+        ]
+        assert [str(node.label) for node in tests.children] == ["test_app.py [modified]"]
+        assert src.is_expanded
+        assert src.data is not None and src.data.directory_path == "src/stg_layers"
+        file = src.children[0]
+        assert file.is_collapsed
+        assert file.data is not None and file.data.file_path == "src/stg_layers/app.py"
+        assert "src/stg_layers/app.py" in file.data.title
+        assert file.children[0].data is not None
+        assert file.children[0].data.file_path == "src/stg_layers/app.py"
+        assert group.data is not None
+        assert StgLayersApp._tree_item_key(src.data) != StgLayersApp._tree_item_key(group.data)
+
+
+def test_grouped_tree_preserves_state_and_file_actions() -> None:
+    async def run_app() -> None:
+        fixture = FixtureRepository()
+        repository = MutableFixtureRepository(
+            staged=(fixture._file_change("src/stg_layers/staged.py", "old", "new"),),
+            unstaged=tuple(fixture._file_change(path, "old", "new") for path in (
+                "src/stg_layers/app.py", "tests/test_app.py"
+            )),
+        )
+        repository.patch_files = [fixture._file_change("src/stg_layers/patch.py", "old", "new")]
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.focus()
+            staged_directory = tree.root.children[1].children[0]
+            tree.move_cursor(staged_directory)
+            staged_directory.collapse()
+            await pilot.press("r")
+            await pilot.pause()
+            assert tree.cursor_node is not None and tree.cursor_node.data is not None
+            assert tree.cursor_node.data.directory_path == "src/stg_layers"
+            assert tree.cursor_node.is_collapsed
+            await pilot.press("shift+r")
+            await pilot.pause()
+            assert tree.cursor_node is not None and tree.cursor_node.is_collapsed
+            await pilot.press("shift+r")
+            await pilot.pause()
+
+            patch_directory = tree.root.children[2].children[0].children[0]
+            tree.move_cursor(patch_directory)
+            await pilot.press(
+                "enter", "c", "h", "shift+h", "delete", "e", "p"
+            )
+            assert repository.patch_moves == []
+            assert repository.patch_operations == []
+            assert repository.edited_patches == []
+            assert repository.patch_pushes == []
+            assert repository.actions == []
+            assert app.screen is app.screen_stack[0]
+
+            directory = tree.root.children[0].children[0]
+            tree.move_cursor(directory)
+            file = directory.children[0]
+            file.expand()
+            tree.move_cursor(file)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert tree.cursor_node is not None and tree.cursor_node.data is not None
+            assert tree.cursor_node.data.file_path == "tests/test_app.py"
+            assert tree.cursor_node.parent is not None and tree.cursor_node.parent.is_expanded
+            assert repository.actions == [("stage_file", "src/stg_layers/app.py", None)]
+
+            staged_directory = tree.root.children[1].children[0]
+            staged_directory.expand()
+            staged_file = staged_directory.children[1]
+            staged_file.expand()
+            tree.move_cursor(staged_file)
+            await pilot.press("ctrl+up")
+            await pilot.pause()
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.file_path == "src/stg_layers/app.py"
+            assert selected.data.change_area == "unstaged"
+            assert selected.is_expanded
+            assert "+new" in app.query_one("#diff-view", TextArea).text
+            tree.root.children[1].children[0].collapse()
+            await pilot.press("ctrl+down")
+            await pilot.pause()
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.file_path == "src/stg_layers/app.py"
+            assert selected.data.change_area == "staged"
+            assert selected.parent is not None and selected.parent.is_expanded
+
+    asyncio.run(run_app())
 
 
 def test_app_renders_patch_file_hunk_tree() -> None:

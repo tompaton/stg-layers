@@ -24,9 +24,19 @@ stg-layers
 The default tree order shows **Unstaged changes**, **Staged changes**, then
 **Patch stack**, with patches newest to oldest. Press **Shift+R** to reverse the
 order: patches oldest to newest, then staged and unstaged changes. The patch
-stack expands to patches > files > hunks; the staged and unstaged sections
-expand to files > hunks. On startup, sections and patches are expanded to show
-their files, while each file's hunks are collapsed. Non-ignored untracked files
+stack expands to patches > directories > files > hunks; staged and unstaged
+changes use the same directory grouping. Single-directory chains without files
+in intermediate directories are combined, for example `src/stg_layers`.
+On startup, sections, patches, and directories are expanded to show their files,
+while each file's hunks are collapsed. On a directory, **Enter** stages or unstages
+all its contained files, including files in collapsed subdirectories. **Ctrl+Up/Down**
+moves all those files in the displayed direction: between unstaged and staged
+changes, into or out of the current patch, or between adjacent applied patches.
+Selection follows the directory with the Ctrl shortcuts. Enter on a directory
+inside a patch leaves it unchanged. Directory transfers between patches use one
+transaction, so a failure or conflict can roll back the entire group through
+the existing Undo process. Other patches and local changes are preserved.
+Non-ignored untracked files
 appear as additions in **Unstaged changes**.
 
 Use **Up/Down** to move between visible nodes. **Right** expands a node or moves

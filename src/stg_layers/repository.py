@@ -475,6 +475,24 @@ class StGitRepository:
         toward_newer: bool,
         hunk_diff: str | None = None,
     ) -> tuple[PatchChangeMoveResult, str | None]:
+        return self._move_patch_changes(
+            patch_name, ((path, hunk_diff),), toward_newer=toward_newer
+        )
+
+    def move_patch_changes(
+        self, patch_name: str, paths: tuple[str, ...], *, toward_newer: bool
+    ) -> tuple[PatchChangeMoveResult, str | None]:
+        return self._move_patch_changes(
+            patch_name, tuple((path, None) for path in paths), toward_newer=toward_newer
+        )
+
+    def _move_patch_changes(
+        self,
+        patch_name: str,
+        changes: tuple[tuple[str, str | None], ...],
+        *,
+        toward_newer: bool,
+    ) -> tuple[PatchChangeMoveResult, str | None]:
         self._ensure_patch_stack_is_safe()
         series = _parse_series(self._run("stg", "series", "--all"))
         move_result, target_name, patch_index = self._patch_change_destination(
@@ -493,27 +511,23 @@ class StGitRepository:
         )
         if source_patch is None:
             raise RepositoryError(f"Patch {patch_name!r} disappeared from the StGit stack.")
-        selected_diff = self._selected_patch_change_diff(
-            source_patch,
-            patch_name,
-            path,
-            hunk_diff,
-        )
+        selected_diffs = [
+            (path, self._selected_patch_change_diff(source_patch, patch_name, path, hunk_diff))
+            for path, hunk_diff in changes
+        ]
         popped_patches = tuple(
             name
             for name, status, _ in series[patch_index + 1 :]
             if status in {PatchStatus.APPLIED, PatchStatus.CURRENT}
         )
-        self._run_stack_transaction(
-            lambda run_stg: self._move_patch_change_sequence(
-                run_stg,
-                patch_name,
-                path,
-                selected_diff,
-                popped_patches,
-                toward_newer,
-            )
-        )
+        def move_all(run_stg: Callable[..., str]) -> None:
+            for path, selected_diff in selected_diffs:
+                self._move_patch_change_sequence(
+                    run_stg, patch_name, path, selected_diff, popped_patches, toward_newer
+                )
+
+        if selected_diffs:
+            self._run_stack_transaction(move_all)
         return PatchChangeMoveResult.MOVED, target_name
 
     @staticmethod
@@ -743,10 +757,18 @@ class StGitRepository:
         return None
 
     def stage_file(self, path: str) -> None:
-        self._run("git", "--literal-pathspecs", "add", "--", path)
+        self.stage_files((path,))
+
+    def stage_files(self, paths: tuple[str, ...]) -> None:
+        if paths:
+            self._run("git", "--literal-pathspecs", "add", "--", *paths)
 
     def unstage_file(self, path: str) -> None:
-        self._run("git", "--literal-pathspecs", "restore", "--staged", "--", path)
+        self.unstage_files((path,))
+
+    def unstage_files(self, paths: tuple[str, ...]) -> None:
+        if paths:
+            self._run("git", "--literal-pathspecs", "restore", "--staged", "--", *paths)
 
     def new_patch_template(self) -> str:
         with tempfile.TemporaryDirectory(prefix="stg-layers-") as directory:
@@ -856,14 +878,21 @@ class StGitRepository:
             )
 
     def refresh_staged_file_to_current_patch(self, path: str) -> None:
+        self.refresh_staged_files_to_current_patch((path,))
+
+    def refresh_staged_files_to_current_patch(self, paths: tuple[str, ...]) -> None:
+        self._ensure_patch_stack_is_safe()
+        if not paths:
+            return
         path_groups = self._staged_path_groups()
-        selected_paths = {path}
-        for group in path_groups:
-            if path in group:
-                selected_paths.update(group)
-                break
-        else:
-            raise RepositoryError(f"No staged changes remain for {path!r}.")
+        selected_paths = set(paths)
+        for path in paths:
+            for group in path_groups:
+                if path in group:
+                    selected_paths.update(group)
+                    break
+            else:
+                raise RepositoryError(f"No staged changes remain for {path!r}.")
 
         staged_paths = tuple(
             staged_path
@@ -895,12 +924,19 @@ class StGitRepository:
         self._restore_staged_changes(saved_changes)
 
     def spill_current_patch_file(self, path: str) -> None:
+        self.spill_current_patch_files((path,))
+
+    def spill_current_patch_files(self, paths: tuple[str, ...]) -> None:
+        self._ensure_patch_stack_is_safe()
+        if not paths:
+            return
         path_groups = self._staged_path_groups()
-        if any(path in group for group in path_groups):
-            raise RepositoryError(
-                f"Cannot spill {path!r} while it has staged changes. Unstage those changes "
-                "first so they are not mixed with the patch contents."
-            )
+        for path in paths:
+            if any(path in group for group in path_groups):
+                raise RepositoryError(
+                    f"Cannot spill {path!r} while it has staged changes. Unstage those changes "
+                    "first so they are not mixed with the patch contents."
+                )
 
         staged_paths = tuple(staged_path for group in path_groups for staged_path in group)
         saved_changes = self._save_other_staged_changes(set(), staged_paths)
@@ -916,7 +952,7 @@ class StGitRepository:
                     change[0],
                 )
                 unstaged_changes.append(change)
-            self._run("stg", "spill", "--", path)
+            self._run("stg", "spill", "--", *(f":(literal){path}" for path in paths))
         except RepositoryError as error:
             try:
                 self._restore_staged_changes(unstaged_changes)

@@ -239,6 +239,185 @@ def test_delete_selected_patch_in_each_state(tmp_path: Path, status: str) -> Non
         assert (tmp_path / "third.txt").read_text(encoding="utf-8") == "third\nthird layer\n"
 
 
+def _create_directory_transfer_stack(
+    root: Path, environment: dict[str, str], toward_newer: bool
+) -> tuple[str, ...]:
+    _create_git_repository(root, environment)
+    (root / "dir [x]/nested").mkdir(parents=True)
+    paths = ("dir [x]/existing.txt", "dir [x]/nested/new.dat", "dir [x]/deleted.txt")
+    (root / paths[0]).write_text("old\n", encoding="utf-8")
+    (root / paths[2]).write_text("delete me\n", encoding="utf-8")
+    _run(root, environment, "git", "add", ".")
+    _run(root, environment, "git", "commit", "-qm", "directory base")
+    _run(root, environment, "stg", "init")
+    _run(root, environment, "stg", "new", "-m", "First", "first")
+    if not toward_newer:
+        _run(root, environment, "stg", "new", "-m", "Second", "second")
+    (root / paths[0]).write_text("new\n", encoding="utf-8")
+    (root / paths[1]).write_bytes(b"\x00binary addition\xff\n")
+    (root / paths[2]).unlink()
+    _run(root, environment, "git", "add", ".")
+    _run(root, environment, "stg", "refresh", "--index")
+    if toward_newer:
+        _run(root, environment, "stg", "new", "-m", "Second", "second")
+    return paths
+
+
+@pytest.mark.parametrize("toward_newer", [False, True])
+def test_move_directory_files_between_patches(tmp_path: Path, toward_newer: bool) -> None:
+    environment = _git_environment()
+    paths = _create_directory_transfer_stack(tmp_path, environment, toward_newer)
+    repository = StGitRepository(tmp_path)
+    source, target = ("first", "second") if toward_newer else ("second", "first")
+    (tmp_path / "file.txt").write_text("staged local\n", encoding="utf-8")
+    _run(tmp_path, environment, "git", "add", "file.txt")
+    (tmp_path / "file.txt").write_text("unstaged local\n", encoding="utf-8")
+    original_status = _run(tmp_path, environment, "git", "status", "--porcelain")
+
+    assert repository.move_patch_changes(source, paths, toward_newer=toward_newer) == (
+        PatchChangeMoveResult.MOVED, target
+    )
+
+    patches = {patch.name: patch for patch in repository.load_stack()}
+    assert not patches[source].files
+    assert {file.path for file in patches[target].files} == set(paths)
+    assert (tmp_path / paths[0]).read_text(encoding="utf-8") == "new\n"
+    assert (tmp_path / paths[1]).read_bytes() == b"\x00binary addition\xff\n"
+    assert not (tmp_path / paths[2]).exists()
+    assert _run(tmp_path, environment, "git", "status", "--porcelain") == original_status
+    assert "+staged local" in _run(tmp_path, environment, "git", "diff", "--cached")
+    assert (tmp_path / "file.txt").read_text(encoding="utf-8") == "unstaged local\n"
+    assert not _run(tmp_path, environment, "git", "stash", "list")
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_failed_directory_move_rolls_back_all_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, conflict: bool
+) -> None:
+    environment = _git_environment()
+    paths = _create_directory_transfer_stack(tmp_path, environment, True)
+    repository = StGitRepository(tmp_path)
+    original_stack = repository.load_stack()
+    original_head = _run(tmp_path, environment, "git", "rev-parse", "HEAD")
+    (tmp_path / "local.txt").write_text("preserved\n", encoding="utf-8")
+    run = repository._run
+
+    def fail_second_file(
+        executable: str, *args: str, allowed_returncodes: tuple[int, ...] = (),
+        input_text: str | None = None,
+    ) -> str:
+        if executable == "stg" and args == ("spill", "--", f":(literal){paths[1]}"):
+            if conflict:
+                run(executable, *args)
+                blob = run("git", "rev-parse", "HEAD:file.txt").strip()
+                run("git", "update-index", "--index-info", input_text=(
+                    f"100644 {blob} 1\tfile.txt\n100644 {blob} 2\tfile.txt\n"
+                    f"100644 {blob} 3\tfile.txt\n"
+                ))
+            raise RepositoryError("Injected second file failure")
+        return run(
+            executable, *args, allowed_returncodes=allowed_returncodes, input_text=input_text
+        )
+
+    monkeypatch.setattr(repository, "_run", fail_second_file)
+    with pytest.raises(RepositoryError, match="Injected second file failure"):
+        repository.move_patch_changes("first", paths, toward_newer=True)
+    if conflict:
+        assert repository.stack_operation_pending
+        repository.undo_stack_operation()
+
+    assert repository.load_stack() == original_stack
+    assert _run(tmp_path, environment, "git", "rev-parse", "HEAD") == original_head
+    assert (tmp_path / "local.txt").read_text(encoding="utf-8") == "preserved\n"
+    assert not repository.has_conflicts()
+    assert not _run(tmp_path, environment, "git", "stash", "list")
+
+
+def test_directory_spill_and_refresh_preserve_other_staged_and_unstaged_changes(
+    tmp_path: Path,
+) -> None:
+    environment = _git_environment()
+    paths = _create_directory_transfer_stack(tmp_path, environment, False)
+    repository = StGitRepository(tmp_path)
+    original_stack = repository.load_stack()
+    (tmp_path / "file.txt").write_text("unrelated staged\n", encoding="utf-8")
+    _run(tmp_path, environment, "git", "add", "file.txt")
+    (tmp_path / paths[0]).write_text("new\nlocal unstaged\n", encoding="utf-8")
+
+    repository.spill_current_patch_files(paths)
+
+    assert not repository.load_stack()[-1].files
+    assert set(
+        _run(tmp_path, environment, "git", "diff", "--cached", "--name-only").splitlines()
+    ) == {*paths, "file.txt"}
+    assert "+local unstaged" in _run(tmp_path, environment, "git", "diff")
+    repository.refresh_staged_files_to_current_patch(paths)
+    assert repository.load_stack() == original_stack
+    assert _run(
+        tmp_path, environment, "git", "diff", "--cached", "--name-only"
+    ).strip() == "file.txt"
+    assert (tmp_path / paths[0]).read_text(encoding="utf-8") == "new\nlocal unstaged\n"
+
+
+def test_directory_spill_checks_all_paths_before_changing_patch(tmp_path: Path) -> None:
+    environment = _git_environment()
+    paths = _create_directory_transfer_stack(tmp_path, environment, False)
+    repository = StGitRepository(tmp_path)
+    original_stack = repository.load_stack()
+    (tmp_path / paths[1]).write_bytes(b"\x00staged change\n")
+    _run(tmp_path, environment, "git", "add", "--", paths[1])
+    original_index = _run(tmp_path, environment, "git", "write-tree")
+
+    with pytest.raises(RepositoryError, match="Unstage those changes first"):
+        repository.spill_current_patch_files(paths)
+
+    assert repository.load_stack() == original_stack
+    assert _run(tmp_path, environment, "git", "write-tree") == original_index
+
+
+def test_directory_refresh_checks_all_paths_before_changing_index(tmp_path: Path) -> None:
+    environment = _git_environment()
+    paths = _create_directory_transfer_stack(tmp_path, environment, False)
+    repository = StGitRepository(tmp_path)
+    repository.spill_current_patch_files(paths)
+    original_stack = repository.load_stack()
+    original_index = _run(tmp_path, environment, "git", "write-tree")
+
+    with pytest.raises(RepositoryError, match="No staged changes remain"):
+        repository.refresh_staged_files_to_current_patch((*paths, "missing-file"))
+
+    assert repository.load_stack() == original_stack
+    assert _run(tmp_path, environment, "git", "write-tree") == original_index
+
+
+def test_stage_and_unstage_directory_files_use_exact_paths(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_git_repository(tmp_path, environment)
+    (tmp_path / "dir/nested").mkdir(parents=True)
+    paths = ("dir/old.txt", "dir/nested/[new].txt")
+    (tmp_path / paths[0]).write_text("old\n", encoding="utf-8")
+    _run(tmp_path, environment, "git", "add", ".")
+    _run(tmp_path, environment, "git", "commit", "-qm", "directory base")
+    (tmp_path / paths[0]).unlink()
+    (tmp_path / paths[1]).write_text("new\n", encoding="utf-8")
+    (tmp_path / "dir/nested/n.txt").write_text("not selected\n", encoding="utf-8")
+    (tmp_path / "file.txt").write_text("unrelated staged\n", encoding="utf-8")
+    _run(tmp_path, environment, "git", "add", "file.txt")
+    repository = StGitRepository(tmp_path)
+
+    repository.stage_files(paths)
+
+    assert set(
+        _run(tmp_path, environment, "git", "diff", "--cached", "--name-only").splitlines()
+    ) == {*paths, "file.txt"}
+    repository.unstage_files(paths)
+    assert _run(
+        tmp_path, environment, "git", "diff", "--cached", "--name-only"
+    ).strip() == "file.txt"
+    assert not (tmp_path / paths[0]).exists()
+    assert (tmp_path / paths[1]).read_text(encoding="utf-8") == "new\n"
+
+
 def test_parse_series_records_patch_state_and_description() -> None:
     output = "> current # current patch\n+ earlier # applied patch\n- next # queued patch\n! hidden"
 
