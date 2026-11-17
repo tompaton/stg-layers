@@ -105,6 +105,16 @@ class StackReader(Protocol):
 
     def pop_patch(self, patch_name: str) -> None: ...
 
+    def commit_patch(self, patch_name: str) -> None: ...
+
+    def uncommit_patch(self) -> None: ...
+
+    def hide_patch(self, patch_name: str) -> None: ...
+
+    def unhide_patch(self, patch_name: str) -> None: ...
+
+    def delete_patch(self, patch_name: str) -> None: ...
+
     def undo_stack_operation(self) -> None: ...
 
     def refresh_stack_operation(self) -> str | None: ...
@@ -169,6 +179,43 @@ class PatchMessageDialog(ModalScreen[str | None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class DeletePatchDialog(ModalScreen[bool]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+    DEFAULT_CSS = """
+    DeletePatchDialog { align: center middle; }
+    #delete-dialog {
+        width: 64;
+        height: auto;
+        border: round $warning;
+        background: $surface;
+        padding: 1 2;
+    }
+    #delete-actions { height: auto; align-horizontal: right; }
+    """
+
+    def __init__(self, patch_name: str) -> None:
+        super().__init__()
+        self.patch_name = patch_name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="delete-dialog"):
+            yield Static(Text(f"Delete patch {self.patch_name}?"))
+            with Horizontal(id="delete-actions"):
+                yield Button("Cancel", id="cancel-delete")
+                yield Button("OK", id="confirm-delete", variant="error")
+
+    def on_mount(self) -> None:
+        self.query_one("#cancel-delete", Button).focus()
+
+    @on(Button.Pressed, "#cancel-delete")
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#confirm-delete")
+    def confirm(self) -> None:
+        self.dismiss(True)
 
 
 class ConflictDialog(ModalScreen[str | None]):
@@ -273,7 +320,12 @@ class LayerTree(Tree[TreeItem]):
             show=False,
             priority=True,
         ),
-        Binding("c", "create_patch", "New patch"),
+        Binding("n", "create_patch", "New patch"),
+        Binding("c", "patch_operation('commit')", "Commit patch"),
+        Binding("C,shift+c", "uncommit_patch", "Uncommit", key_display="Shift+C"),
+        Binding("h", "patch_operation('hide')", "Hide patch"),
+        Binding("H,shift+h", "patch_operation('unhide')", "Unhide patch", key_display="Shift+H"),
+        Binding("delete", "patch_operation('delete')", "Delete patch"),
         Binding("e", "edit_patch", "Edit patch"),
         Binding("p", "push_patch", "Push patch"),
         Binding("P,shift+p", "pop_patch", "Pop patch", key_display="Shift+P"),
@@ -312,6 +364,12 @@ class LayerTree(Tree[TreeItem]):
 
     async def action_create_patch(self) -> None:
         await self.app.run_action("create_patch")
+
+    async def action_patch_operation(self, operation: str) -> None:
+        await self.app.run_action(f"patch_operation('{operation}')")
+
+    async def action_uncommit_patch(self) -> None:
+        await self.app.run_action("uncommit_patch")
 
     async def action_apply_selected_change(self) -> None:
         await self.app.run_action("apply_selected_change")
@@ -628,6 +686,57 @@ class StgLayersApp(App[None]):
                 diff_text="",
                 patch_name=item.patch_name,
             )
+        )
+
+    async def action_uncommit_patch(self) -> None:
+        if not await self._ensure_repository_ready():
+            return
+        try:
+            await asyncio.to_thread(self.repository.uncommit_patch)
+        except RepositoryError as error:
+            await self._handle_stack_operation_error(error)
+            return
+        await self._load_stack()
+
+    async def action_patch_operation(self, operation: str) -> None:
+        tree = self.query_one("#patch-tree", LayerTree)
+        node = tree.cursor_node
+        item = node.data if node is not None else None
+        if item is None or item.patch_name is None or item.file_path is not None:
+            self.query_one("#status", Static).update(f"Select a patch to {operation}.")
+            return
+        if not await self._ensure_repository_ready():
+            return
+        if operation == "delete":
+            patch_name = item.patch_name
+
+            def confirmed(result: bool | None) -> None:
+                if result:
+                    self.run_worker(
+                        self._run_patch_operation(operation, patch_name), exclusive=True
+                    )
+
+            self.push_screen(DeletePatchDialog(patch_name), confirmed)
+            return
+        await self._run_patch_operation(operation, item.patch_name)
+
+    async def _run_patch_operation(self, operation: str, patch_name: str) -> None:
+        if not await self._ensure_repository_ready():
+            return
+        operations = {
+            "commit": self.repository.commit_patch,
+            "hide": self.repository.hide_patch,
+            "unhide": self.repository.unhide_patch,
+            "delete": self.repository.delete_patch,
+        }
+        self.query_one("#status", Static).update(f"Running {operation} on patch {patch_name}...")
+        try:
+            await asyncio.to_thread(operations[operation], patch_name)
+        except RepositoryError as error:
+            await self._handle_stack_operation_error(error)
+            return
+        await self._load_stack(
+            preferred_selection=TreeItem(title="", diff_text="", patch_name=patch_name)
         )
 
     async def _handle_stack_operation_error(self, error: RepositoryError) -> None:

@@ -4,7 +4,7 @@ from dataclasses import replace
 from rich.text import Text
 from textual.widgets import Static, TextArea, Tree
 
-from stg_layers.app import ConflictDialog, StgLayersApp
+from stg_layers.app import ConflictDialog, DeletePatchDialog, StgLayersApp
 from stg_layers.models import DiffHunk, FileChange, FileStatus, Patch, PatchStatus
 from stg_layers.repository import (
     PatchChangeMoveResult,
@@ -26,6 +26,7 @@ class FixtureRepository:
         self.patch_change_moves: list[tuple[str, str, bool, str | None]] = []
         self.patch_pushes: list[str] = []
         self.patch_pops: list[str] = []
+        self.patch_operations: list[tuple[str, str | None]] = []
         self.undo_count = 0
         self.conflicted = False
         self.conflict_on_older_move = False
@@ -127,6 +128,24 @@ class FixtureRepository:
 
     def pop_patch(self, patch_name: str) -> None:
         self.patch_pops.append(patch_name)
+
+    def commit_patch(self, patch_name: str) -> None:
+        self.patch_operations.append(("commit", patch_name))
+        if self.conflict_on_push:
+            self.conflicted = True
+            raise RepositoryError("Merge conflict")
+
+    def uncommit_patch(self) -> None:
+        self.patch_operations.append(("uncommit", None))
+
+    def hide_patch(self, patch_name: str) -> None:
+        self.patch_operations.append(("hide", patch_name))
+
+    def unhide_patch(self, patch_name: str) -> None:
+        self.patch_operations.append(("unhide", patch_name))
+
+    def delete_patch(self, patch_name: str) -> None:
+        self.patch_operations.append(("delete", patch_name))
 
     def undo_stack_operation(self) -> None:
         self.undo_count += 1
@@ -731,6 +750,69 @@ def test_ctrl_shortcuts_follow_reversed_tree_direction() -> None:
     asyncio.run(run_app())
 
 
+def test_patch_management_shortcuts_and_delete_confirmation() -> None:
+    async def run_app() -> None:
+        repository = FixtureRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.focus()
+            tree.move_cursor(tree.root.children[2].children[0])
+            for key in ("c", "shift+c", "h", "shift+h"):
+                await pilot.press(key)
+                await pilot.pause()
+            name = "types [notes]"
+            assert repository.patch_operations == [
+                ("commit", name), ("uncommit", None), ("hide", name), ("unhide", name)
+            ]
+
+            await pilot.press("delete")
+            assert isinstance(app.screen, DeletePatchDialog)
+            assert len(repository.patch_operations) == 4
+            await pilot.click("#cancel-delete")
+            await pilot.pause()
+            assert len(repository.patch_operations) == 4
+
+            await pilot.press("delete")
+            await pilot.press("escape")
+            await pilot.pause()
+            assert len(repository.patch_operations) == 4
+
+            await pilot.press("delete")
+            await pilot.click("#confirm-delete")
+            await pilot.pause()
+            assert repository.patch_operations[-1] == ("delete", name)
+            assert not isinstance(app.screen, DeletePatchDialog)
+
+            tree.move_cursor(tree.root.children[2].children[0].children[0])
+            await pilot.press("c", "h", "shift+h", "delete")
+            assert len(repository.patch_operations) == 5
+
+    asyncio.run(run_app())
+
+
+def test_conflicting_commit_offers_undo() -> None:
+    async def run_app() -> None:
+        repository = FixtureRepository()
+        repository.conflict_on_push = True
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.focus()
+            tree.move_cursor(tree.root.children[2].children[0])
+            await pilot.press("c")
+            await pilot.pause()
+            assert isinstance(app.screen, ConflictDialog)
+            await pilot.click("#undo-conflict")
+            await pilot.pause()
+            assert repository.undo_count == 1
+            assert not repository.conflicted
+
+    asyncio.run(run_app())
+
+
 def test_create_patch_dialog_passes_edited_template_to_repository() -> None:
     async def run_app() -> None:
         repository = FixtureRepository()
@@ -738,7 +820,7 @@ def test_create_patch_dialog_passes_edited_template_to_repository() -> None:
         async with app.run_test() as pilot:
             await pilot.pause()
             app.query_one("#patch-tree", Tree).focus()
-            await pilot.press("c")
+            await pilot.press("n")
             await pilot.pause()
 
             message = app.screen.query_one("#patch-message", TextArea)
@@ -761,7 +843,7 @@ def test_create_patch_dialog_can_be_cancelled() -> None:
         async with app.run_test() as pilot:
             await pilot.pause()
             app.query_one("#patch-tree", Tree).focus()
-            await pilot.press("c")
+            await pilot.press("n")
             await pilot.pause()
             await pilot.press("escape")
             await pilot.pause()

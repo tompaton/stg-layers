@@ -127,6 +127,118 @@ def _create_git_repository(root: Path, environment: dict[str, str]) -> None:
     _run(root, environment, "git", "commit", "-qm", "base")
 
 
+def test_commit_selected_patch_and_uncommit_one_commit(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_three_patch_stack(tmp_path, environment)
+    repository = StGitRepository(tmp_path)
+    (tmp_path / "local.txt").write_text("local\n", encoding="utf-8")
+
+    repository.commit_patch("second")
+
+    assert [patch.name for patch in repository.load_stack()] == ["first", "third"]
+    assert _run(
+        tmp_path, environment, "git", "log", "-1", "--format=%s", "HEAD~2"
+    ).strip() == "Second patch"
+    repository.uncommit_patch()
+    patches = repository.load_stack()
+    assert len(patches) == 3
+    assert "+current layer" in patches[0].diff_text
+    assert [patch.name for patch in patches[1:]] == ["first", "third"]
+    assert (tmp_path / "local.txt").read_text(encoding="utf-8") == "local\n"
+    assert not _run(tmp_path, environment, "git", "stash", "list")
+
+
+@pytest.mark.parametrize("unapplied", [False, True])
+def test_hide_unhide_and_delete_patch_preserve_local_changes(
+    tmp_path: Path, unapplied: bool
+) -> None:
+    environment = _git_environment()
+    _create_three_patch_stack(tmp_path, environment)
+    repository = StGitRepository(tmp_path)
+    if unapplied:
+        _run(tmp_path, environment, "stg", "pop", "--all")
+    (tmp_path / "fourth.txt").write_text("staged local\n", encoding="utf-8")
+    _run(tmp_path, environment, "git", "add", "fourth.txt")
+    (tmp_path / "fourth.txt").write_text("unstaged local\n", encoding="utf-8")
+    original_status = _run(tmp_path, environment, "git", "status", "--porcelain")
+
+    repository.hide_patch("second")
+    patches = {patch.name: patch for patch in repository.load_stack()}
+    assert patches["second"].status == PatchStatus.HIDDEN
+    repository.unhide_patch("second")
+    patches = {patch.name: patch for patch in repository.load_stack()}
+    assert patches["second"].status == PatchStatus.UNAPPLIED
+    repository.delete_patch("second")
+    assert [patch.name for patch in repository.load_stack()] == ["first", "third"]
+    assert _run(tmp_path, environment, "git", "status", "--porcelain") == original_status
+    assert "+staged local" in _run(tmp_path, environment, "git", "diff", "--cached")
+    assert (tmp_path / "fourth.txt").read_text(encoding="utf-8") == "unstaged local\n"
+    assert not _run(tmp_path, environment, "git", "stash", "list")
+
+
+@pytest.mark.parametrize(
+    "operation,patch",
+    [("commit_patch", "second"), ("delete_patch", "first"), ("hide_patch", "first")],
+)
+def test_conflicting_patch_operations_can_be_undone(
+    tmp_path: Path, operation: str, patch: str
+) -> None:
+    environment = _git_environment()
+    _create_conflicting_two_patch_stack(tmp_path, environment)
+    repository = StGitRepository(tmp_path)
+    original_series = _run(tmp_path, environment, "stg", "series", "--all")
+    original_head = _run(tmp_path, environment, "git", "rev-parse", "HEAD")
+    (tmp_path / "local.txt").write_text("local\n", encoding="utf-8")
+
+    with pytest.raises(CommandError):
+        getattr(repository, operation)(patch)
+
+    assert repository.has_conflicts()
+    assert repository.stack_operation_pending
+    repository.undo_stack_operation()
+    assert _run(tmp_path, environment, "stg", "series", "--all") == original_series
+    assert _run(tmp_path, environment, "git", "rev-parse", "HEAD") == original_head
+    assert (tmp_path / "local.txt").read_text(encoding="utf-8") == "local\n"
+    assert not repository.has_conflicts()
+    assert not _run(tmp_path, environment, "git", "stash", "list")
+
+
+def test_uncommit_with_an_empty_patch_stack(tmp_path: Path) -> None:
+    environment = _git_environment()
+    _create_two_patch_stack(tmp_path, environment)
+    _run(tmp_path, environment, "stg", "commit", "--all")
+    repository = StGitRepository(tmp_path)
+    original_head = _run(tmp_path, environment, "git", "rev-parse", "HEAD")
+
+    repository.uncommit_patch()
+
+    patches = repository.load_stack()
+    assert len(patches) == 1
+    assert patches[0].status == PatchStatus.CURRENT
+    assert "+current layer" in patches[0].diff_text
+    assert _run(tmp_path, environment, "git", "rev-parse", "HEAD") == original_head
+    assert not _run(tmp_path, environment, "git", "status", "--porcelain")
+
+
+@pytest.mark.parametrize("status", ["applied", "unapplied", "hidden"])
+def test_delete_selected_patch_in_each_state(tmp_path: Path, status: str) -> None:
+    environment = _git_environment()
+    _create_three_patch_stack(tmp_path, environment)
+    repository = StGitRepository(tmp_path)
+    if status != "applied":
+        _run(tmp_path, environment, "stg", "pop", "--all")
+    if status == "hidden":
+        _run(tmp_path, environment, "stg", "hide", "second")
+
+    repository.delete_patch("second")
+
+    assert [patch.name for patch in repository.load_stack()] == ["first", "third"]
+    assert not _run(tmp_path, environment, "git", "status", "--porcelain")
+    if status == "applied":
+        assert (tmp_path / "other.txt").read_text(encoding="utf-8") == "other\n"
+        assert (tmp_path / "third.txt").read_text(encoding="utf-8") == "third\nthird layer\n"
+
+
 def test_parse_series_records_patch_state_and_description() -> None:
     output = "> current # current patch\n+ earlier # applied patch\n- next # queued patch\n! hidden"
 

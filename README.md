@@ -49,7 +49,7 @@ file state is retained. Hunk actions preserve other hunks in the same file.
 File actions include untracked files. Enter and the staged / unstaged
 shortcuts update Git's index but leave working-tree contents and the patch
 stack unchanged. Patch-stack nodes are not modified by Enter. Press
-**c** while the tree is focused to edit StGit's
+**n** while the tree is focused to edit StGit's
 new-patch message template; select **Create** to add an empty patch on top of
 the applied stack, or **Cancel**/Escape to leave the stack unchanged. Press
 **e** on a patch node to edit that patch's StGit-generated message template.
@@ -88,6 +88,16 @@ unapplied boundary. A file in the current patch still spills to **Staged
 changes** when moving toward newer patches, where no applied destination
 exists. Local staged, unstaged, and untracked changes are stashed and restored
 with their staged state preserved for the entire transfer.
+
+On a patch node, press **c** to commit that patch into the stack's base using
+`stg commit <patch>`. StGit rearranges the stack as needed to commit the selected
+patch. Press **Shift+C** to convert the newest commit beneath the patch stack
+into one applied patch using `stg uncommit --number 1`; this works even with an
+empty stack. Press **h** to hide the selected patch, or **Shift+H** to unhide it.
+Hidden patches remain visible here with the `~` status marker; unhiding leaves
+them unapplied. Press **Delete** on a patch to open an **OK/Cancel** confirmation
+before deleting it. These operations preserve local changes and use the same
+conflict recovery as reordering.
 
 On an unapplied patch node, press **p** to run `stg push <patch>`. On an applied
 or current patch node, press **Shift+P** to run `stg pop <patch>`. StGit applies

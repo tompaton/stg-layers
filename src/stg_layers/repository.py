@@ -661,6 +661,35 @@ class StGitRepository:
     def pop_patch(self, patch_name: str) -> None:
         self._run_stack_operation("pop", self._patch_ref(patch_name))
 
+    def commit_patch(self, patch_name: str) -> None:
+        self._run_stack_operation("commit", self._patch_ref(patch_name))
+
+    def uncommit_patch(self) -> None:
+        self._run_stack_operation("uncommit", "--number", "1")
+
+    def hide_patch(self, patch_name: str) -> None:
+        series = _parse_series(self._run("stg", "series", "--all"))
+        applied_names = [
+            name for name, status, _ in series
+            if status in {PatchStatus.APPLIED, PatchStatus.CURRENT}
+        ]
+        if patch_name not in applied_names:
+            self._run_stack_operation("hide", self._patch_ref(patch_name))
+            return
+
+        def hide_applied(run_stg: Callable[..., str]) -> None:
+            # Hide alone changes stack metadata without updating the worktree.
+            run_stg("pop", self._patch_ref(patch_name))
+            run_stg("hide", self._patch_ref(patch_name))
+
+        self._run_stack_transaction(hide_applied)
+
+    def unhide_patch(self, patch_name: str) -> None:
+        self._run_stack_operation("unhide", self._patch_ref(patch_name))
+
+    def delete_patch(self, patch_name: str) -> None:
+        self._run_stack_operation("delete", self._patch_ref(patch_name))
+
     @staticmethod
     def _patch_ref(patch_name: str) -> str:
         return f"\\{patch_name}" if patch_name.startswith("-") else patch_name
