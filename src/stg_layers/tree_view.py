@@ -17,13 +17,13 @@ class LayerTree(Tree[TreeItem]):
         ),
         Binding("n", "create_patch", "New patch"),
         Binding("c", "patch_operation('commit')", "Commit patch"),
-        Binding("C,shift+c", "uncommit_patch", "Uncommit", key_display="Shift+C"),
+        Binding("C,shift+c", "patch_operation('uncommit')", "Uncommit", key_display="Shift+C"),
         Binding("h", "patch_operation('hide')", "Hide patch"),
         Binding("H,shift+h", "patch_operation('unhide')", "Unhide patch", key_display="Shift+H"),
         Binding("delete", "patch_operation('delete')", "Delete patch"),
         Binding("e", "edit_patch", "Edit patch"),
-        Binding("p", "push_patch", "Push patch"),
-        Binding("P,shift+p", "pop_patch", "Pop patch", key_display="Shift+P"),
+        Binding("p", "patch_operation('push')", "Push patch"),
+        Binding("P,shift+p", "patch_operation('pop')", "Pop patch", key_display="Shift+P"),
         Binding(
             "ctrl+down",
             "move_change_down",
@@ -51,20 +51,11 @@ class LayerTree(Tree[TreeItem]):
     async def action_edit_patch(self) -> None:
         await self.app.run_action("edit_selected_patch")
 
-    async def action_push_patch(self) -> None:
-        await self.app.run_action("push_selected_patch")
-
-    async def action_pop_patch(self) -> None:
-        await self.app.run_action("pop_selected_patch")
-
     async def action_create_patch(self) -> None:
         await self.app.run_action("create_patch")
 
     async def action_patch_operation(self, operation: str) -> None:
         await self.app.run_action(f"patch_operation('{operation}')")
-
-    async def action_uncommit_patch(self) -> None:
-        await self.app.run_action("uncommit_patch")
 
     async def action_apply_selected_change(self) -> None:
         await self.app.run_action("apply_selected_change")

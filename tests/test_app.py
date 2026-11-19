@@ -484,6 +484,243 @@ def test_repository_errors_are_reported_without_running_success_steps(failure: s
     asyncio.run(run_app())
 
 
+def test_conflict_after_nontransactional_error_does_not_offer_undo() -> None:
+    class ConflictingStageRepository(FixtureRepository):
+        @property
+        def stack_operation_pending(self) -> bool:
+            return False
+
+        def stage_files(self, paths: tuple[str, ...]) -> None:
+            self.conflicted = True
+            raise RepositoryError("stage failed")
+
+    async def run_app() -> None:
+        repository = ConflictingStageRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.focus()
+            tree.move_cursor(tree.root.children[0].children[0])
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, ConflictDialog)
+            assert not app.screen.operation_failed
+            assert not list(app.screen.query("#undo-conflict"))
+            repository.conflicted = False
+            await pilot.click("#refresh-conflict")
+            await pilot.pause()
+            assert app.screen is app.screen_stack[0]
+            assert repository.undo_count == 0
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("selection", ["patch", "file"])
+def test_move_error_aborts_dispatch_without_spilling(selection: str) -> None:
+    class FailedMoveRepository(FixtureRepository):
+        def move_patch_one_step(self, patch_name: str, *, toward_newer: bool) -> PatchMoveResult:
+            raise RepositoryError("move failed")
+
+        def move_patch_change(
+            self,
+            patch_name: str,
+            path: str,
+            *,
+            toward_newer: bool,
+            hunk_diff: str | None = None,
+        ) -> tuple[PatchChangeMoveResult, str | None]:
+            raise RepositoryError("move failed")
+
+    async def run_app() -> None:
+        repository = FailedMoveRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            patch = tree.root.children[2].children[0]
+            selected = patch if selection == "patch" else patch.children[0]
+            tree.focus()
+            tree.move_cursor(selected)
+            await pilot.press("ctrl+up")
+            await pilot.pause()
+            assert tree.cursor_node is selected
+            assert str(app.query_one("#status", Static).render()) == "Error: move failed"
+            assert repository.spilled_files == repository.moved_files == repository.actions == []
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize(
+    ("result", "message"),
+    [
+        (PatchChangeMoveResult.STACK_EDGE, "Patch types [notes] is at the edge of the stack."),
+        (
+            PatchChangeMoveResult.APPLICATION_BOUNDARY,
+            "Changes can only be moved between adjacent applied patches.",
+        ),
+        (
+            PatchChangeMoveResult.SOURCE_NOT_APPLIED,
+            "Changes can only be moved from applied patches.",
+        ),
+    ],
+)
+def test_rejected_patch_change_reports_status_without_reloading(
+    result: PatchChangeMoveResult, message: str
+) -> None:
+    class RejectedMoveRepository(FixtureRepository):
+        def move_patch_change(
+            self,
+            patch_name: str,
+            path: str,
+            *,
+            toward_newer: bool,
+            hunk_diff: str | None = None,
+        ) -> tuple[PatchChangeMoveResult, str | None]:
+            return result, None
+
+    async def run_app() -> None:
+        repository = RejectedMoveRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            # A hunk cannot spill into staged changes at the current-patch boundary.
+            patch = tree.root.children[2].children[0]
+            patch.expand()
+            file = patch.children[0]
+            file.expand()
+            selected = file.children[0]
+            tree.focus()
+            await pilot.pause()
+            tree.move_cursor(selected)
+            await pilot.press("ctrl+up")
+            await pilot.pause()
+            assert tree.cursor_node is selected
+            assert str(app.query_one("#status", Static).render()) == message
+            assert repository.spilled_files == repository.actions == []
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("resolution", ["undo", "refresh"])
+def test_recovery_failure_keeps_pending_transaction_recoverable(resolution: str) -> None:
+    class FailedRecoveryRepository(FixtureRepository):
+        probe_failed = False
+
+        def has_conflicts(self) -> bool:
+            if self.probe_failed:
+                raise RepositoryError("conflict check failed")
+            return False
+
+        def undo_stack_operation(self) -> None:
+            self.probe_failed = True
+            raise RepositoryError("undo failed")
+
+        def refresh_stack_operation(self) -> str | None:
+            self.probe_failed = True
+            raise RepositoryError("refresh failed")
+
+    async def run_app() -> None:
+        repository = FailedRecoveryRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            repository.pending_stash_reference = "saved-changes"
+            app._conflict_locked = True
+            await app._finish_stack_operation_conflict_resolution(resolution)
+            await pilot.pause()
+            assert isinstance(app.screen, ConflictDialog)
+            assert app.screen.operation_failed
+            assert list(app.screen.query("#undo-conflict"))
+            assert repository.stack_operation_stash_reference == "saved-changes"
+
+    asyncio.run(run_app())
+
+
+def test_move_dispatch_keeps_the_original_selection_across_awaits() -> None:
+    class SwitchingSelectionApp(StgLayersApp):
+        switched = False
+
+        async def _ensure_repository_ready(self) -> bool:
+            ready = await super()._ensure_repository_ready()
+            if ready and not self.switched:
+                self.switched = True
+                tree = self.query_one("#patch-tree", Tree)
+                tree.move_cursor(tree.root.children[2].children[0].children[1])
+            return ready
+
+    async def run_app() -> None:
+        repository = MutableFixtureRepository()
+        fixture = FixtureRepository()
+        repository.patch_files = [
+            fixture._file_change(path, "old", "new") for path in ("first.py", "second.py")
+        ]
+        app = SwitchingSelectionApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.focus()
+            tree.move_cursor(tree.root.children[2].children[0].children[0])
+            await pilot.press("ctrl+up")
+            await pilot.pause()
+
+            assert repository.spilled_files == ["first.py"]
+            assert [file.path for file in repository.patch_files] == ["second.py"]
+            selected = tree.cursor_node
+            assert selected is not None and selected.data is not None
+            assert selected.data.file_path == "first.py" and selected.data.is_staged
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("ready", [False, True])
+@pytest.mark.parametrize("action", ["spill", "refresh", "stage", "preview"])
+def test_move_and_enter_check_readiness_once_before_dispatch(ready: bool, action: str) -> None:
+    class ReadinessApp(StgLayersApp):
+        readiness_checks = 0
+
+        async def _ensure_repository_ready(self) -> bool:
+            self.readiness_checks += 1
+            return ready and await super()._ensure_repository_ready()
+
+    async def run_app() -> None:
+        repository = MutableFixtureRepository(
+            unstaged=(FixtureRepository()._file_change("unstaged.py", "old", "new"),),
+            staged=(FixtureRepository()._file_change("staged.py", "old", "new"),),
+        )
+        app = ReadinessApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            nodes = {
+                "spill": tree.root.children[2].children[0].children[0],
+                "refresh": tree.root.children[1].children[0],
+            }
+            tree.move_cursor(nodes.get(action, tree.root.children[0].children[0]))
+            if action == "preview":
+                app.query_one("#diff-view", TextArea).focus()
+            else:
+                tree.focus()
+            key = {"spill": "ctrl+up", "refresh": "ctrl+down"}.get(action, "enter")
+            await pilot.press(key)
+            await pilot.pause()
+
+            assert app.readiness_checks == 1
+            if not ready:
+                assert repository.actions == []
+                assert repository.spilled_files == repository.moved_files == []
+                assert repository.patch_change_moves == []
+            elif action == "spill":
+                assert repository.spilled_files == ["example [typing].py"]
+            elif action == "refresh":
+                assert repository.moved_files == ["staged.py"]
+            else:
+                assert repository.actions == [("stage_files", "unstaged.py", None)]
+
+    asyncio.run(run_app())
+
+
 def test_repository_error_context_does_not_suppress_other_errors() -> None:
     async def run_app() -> None:
         app = StgLayersApp(FixtureRepository())
@@ -1378,6 +1615,12 @@ def test_patch_management_shortcuts_and_delete_confirmation() -> None:
             await pilot.press("c", "h", "shift+h", "delete")
             assert len(repository.patch_operations) == 5
 
+            # Uncommit does not require a patch selection.
+            await pilot.press("shift+c")
+            await pilot.pause()
+            assert repository.patch_operations[-1] == ("uncommit", None)
+            assert len(repository.patch_operations) == 6
+
     asyncio.run(run_app())
 
 
@@ -1754,6 +1997,8 @@ def test_push_and_pop_selected_patches_with_p_and_shift_p() -> None:
             }
             tree.move_cursor(nodes["queued"])
             tree.focus()
+            await pilot.press("shift+p")
+            assert repository.patch_pops == []
             await pilot.press("p")
             await pilot.pause()
             assert repository.patch_pushes == ["queued"]
@@ -1764,6 +2009,8 @@ def test_push_and_pop_selected_patches_with_p_and_shift_p() -> None:
                 if node.data is not None
             }
             tree.move_cursor(nodes["current"])
+            await pilot.press("p")
+            assert repository.patch_pushes == ["queued"]
             await pilot.press("shift+p")
             await pilot.pause()
             assert repository.patch_pops == ["current"]
@@ -1943,5 +2190,98 @@ def test_patch_labels_use_compact_ids_titles_and_status_markers() -> None:
                 for node in patch_stack.children
                 if isinstance(node.label, Text)
             ] == ["dim magenta", "yellow", "cyan", "bold green"]
+
+    asyncio.run(run_app())
+
+
+def test_loaded_patch_accessors_distinguish_unloaded_and_empty_stacks() -> None:
+    app = StgLayersApp(FixtureRepository())
+    assert app._get_patch("missing") is None
+    assert app._get_patch(None) is None
+    assert app._current_patch is None
+    with pytest.raises(RepositoryError, match="has not been loaded"):
+        app._require_loaded_patches()
+
+    app._loaded_data = (), (), ()
+    assert app._require_loaded_patches() == ()
+    assert app._get_patch("missing") is None
+    assert app._get_patch(None) is None
+    assert app._current_patch is None
+
+
+def test_patch_accessors_follow_the_latest_loaded_snapshot() -> None:
+    app = StgLayersApp(FixtureRepository())
+    earlier = Patch("earlier", PatchStatus.APPLIED, "", ())
+    current = Patch("current", PatchStatus.CURRENT, "", ())
+    queued = Patch("queued", PatchStatus.UNAPPLIED, "", ())
+    patches = (earlier, current, queued)
+    app._loaded_data = patches, (), ()
+    assert app._require_loaded_patches() is patches
+    assert app._get_patch("earlier") is earlier
+    assert app._get_patch("missing") is None
+    assert app._get_patch(None) is None
+    assert app._current_patch is current
+
+    app._loaded_data = (queued,), (), ()
+    assert app._get_patch("current") is None
+    assert app._get_patch("queued") is queued
+    assert app._current_patch is None
+
+    new_current = replace(queued, status=PatchStatus.CURRENT)
+    app._loaded_data = (new_current,), (), ()
+    assert app._get_patch("queued") is new_current
+    assert app._current_patch is new_current
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("empty", "No files to move in this group."),
+        ("unstaged_edge", "Unstaged changes are at the edge."),
+        ("no_current_group", "There is no current patch to refresh."),
+        ("no_current_file", "There is no current patch to refresh."),
+        ("patch_edge", "Patch types [notes] is already at the top of the stack."),
+        ("patch_boundary", "Patches cannot be reordered across the applied/unapplied boundary."),
+    ],
+)
+def test_move_status_aborts_without_reloading(case: str, message: str) -> None:
+    class StatusRepository(FixtureRepository):
+        loads = 0
+
+        def load_stack(self) -> tuple[Patch, ...]:
+            self.loads += 1
+            return () if case.startswith("no_current") else super().load_stack()
+
+        def load_unstaged_changes(self) -> tuple[FileChange, ...]:
+            return () if case == "empty" else super().load_unstaged_changes()
+
+        def move_patch_one_step(self, patch_name: str, *, toward_newer: bool) -> PatchMoveResult:
+            if case == "patch_boundary":
+                return PatchMoveResult.APPLICATION_BOUNDARY
+            return PatchMoveResult.STACK_EDGE
+
+    async def run_app() -> None:
+        repository = StatusRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.focus()
+            if case.startswith("patch"):
+                selected = tree.root.children[2].children[0]
+            elif case.startswith("no_current"):
+                selected = tree.root.children[1]
+                if case.endswith("file"):
+                    selected = selected.children[0]
+            else:
+                selected = tree.root.children[0]
+            tree.move_cursor(selected)
+            loads = repository.loads
+            await pilot.press("ctrl+down" if case.startswith("no_current") else "ctrl+up")
+            await pilot.pause()
+            assert str(app.query_one("#status", Static).render()) == message
+            assert repository.loads == loads
+            assert tree.cursor_node is selected
+            assert repository.actions == repository.moved_files == repository.spilled_files == []
 
     asyncio.run(run_app())
