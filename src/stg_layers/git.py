@@ -353,6 +353,13 @@ class Git:
     def current_branch(self) -> str | None:
         return self.commands.run("git", "branch", "--show-current").strip() or None
 
+    def remote_url(self) -> str | None:
+        remotes = self.commands.run("git", "remote").splitlines()
+        if not remotes:
+            return None
+        remote = "origin" if "origin" in remotes else remotes[0]
+        return self.commands.run("git", "remote", "get-url", remote).strip() or None
+
     def stash(self) -> str | None:
         if not self.has_local_changes():
             return None

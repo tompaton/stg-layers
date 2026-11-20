@@ -226,3 +226,22 @@ def test_discard_files_preserves_staged_addition(discard_git: Git) -> None:
     git.discard_files((path.name,))
     assert path.read_text() == "staged addition\n"
     assert git.staged_file_diff(path.name) == index
+
+
+@pytest.mark.parametrize(
+    ("remotes", "expected"),
+    [
+        ((), None),
+        (("upstream",), "https://example.com/upstream.git"),
+        (("aaa", "origin", "upstream"), "https://example.com/origin.git"),
+        (("aaa", "upstream"), "https://example.com/aaa.git"),
+    ],
+)
+def test_remote_url_prefers_origin(
+    tmp_path: Path, remotes: tuple[str, ...], expected: str | None
+) -> None:
+    git = Git(CommandRunner(tmp_path))
+    git.commands.run("git", "init", "-q")
+    for remote in remotes:
+        git.commands.run("git", "remote", "add", remote, f"https://example.com/{remote}.git")
+    assert git.remote_url() == expected

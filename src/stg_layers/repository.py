@@ -27,12 +27,15 @@ _T = TypeVar("_T")
 
 
 class StGitRepository:
-    def __init__(self, root: Path, branch: str | None = None) -> None:
+    def __init__(
+        self, root: Path, branch: str | None = None, remote_url: str | None = None
+    ) -> None:
         self.root = root
         self.commands = CommandRunner(root)
         self.git = Git(self.commands)
         self.stg = StGit(self.commands)
         self.branch = branch
+        self.remote_url = remote_url
         self._pending_stack_operation = False
         self._pending_stack_stash: str | None = None
         self._pending_stash_restore_conflict = False
@@ -41,7 +44,11 @@ class StGitRepository:
     @classmethod
     def discover(cls, cwd: Path) -> StGitRepository:
         git = Git.discover(cwd)
-        return cls(git.root, git.current_branch())
+        return cls(git.root, git.current_branch(), git.remote_url())
+
+    def refresh_identity(self) -> None:
+        self.branch = self.git.current_branch()
+        self.remote_url = self.git.remote_url()
 
     def has_conflicts(self) -> bool:
         return self.git.has_conflicts()

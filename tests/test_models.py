@@ -21,7 +21,7 @@ def test_tree_item_factories_keep_rename_labels_and_hunk_identity() -> None:
     file_item, file_label = TreeItem.for_file(file, change_area="staged")
     hunk_item, hunk_label = TreeItem.for_hunk(file, hunk, change_area="staged")
 
-    assert str(file_label) == "old/file.py -> new [file].py [renamed]"
+    assert str(file_label) == "old/file.py -> new [file].py [renamed] +1 -1"
     assert file_item.title == "Staged changes / old/file.py -> new [file].py"
     assert file_item.file_path == file.path
     assert file_item.hunk_index is None
@@ -136,3 +136,38 @@ def test_matching_keeps_contexts_separate_and_hunks_stable_after_reindexing() ->
         assert not item.same_context_as(other)
         assert not item.same_file_as(other)
         assert not item.matches_selection(other)
+
+
+@pytest.mark.parametrize(
+    ("status", "hunks", "counts"),
+    [
+        (FileStatus.ADDED, ("@@ -0,0 +1,2 @@\n+one\n+two\n",), (2, 0)),
+        (FileStatus.DELETED, ("@@ -1,2 +0,0 @@\n-one\n-two\n",), (0, 2)),
+        (
+            FileStatus.MODIFIED,
+            (
+                "@@ -1,2 +1,3 @@\n context\n-before\n+after\n+extra\n",
+                "@@ -20 +21 @@\n---literal minus\n+++literal plus\n\\ No newline at end of file\n",
+            ),
+            (3, 2),
+        ),
+        (FileStatus.RENAMED, (), (0, 0)),
+        (FileStatus.BINARY, (), (0, 0)),
+    ],
+)
+def test_file_labels_show_changed_line_counts(
+    status: FileStatus, hunks: tuple[str, ...], counts: tuple[int, int]
+) -> None:
+    file = FileChange(
+        "dir/file.txt",
+        "dir/file.txt",
+        "dir/file.txt",
+        status,
+        "--- file header\n+++ file header\n",
+        tuple(DiffHunk(i, text.splitlines()[0], text, 0, 0, 0, 0) for i, text in enumerate(hunks)),
+    )
+    assert (file.insertions, file.deletions) == counts
+    _, label = TreeItem.for_file(file, change_area="unstaged")
+    assert str(label).endswith(f"[{status.value}] +{counts[0]} -{counts[1]}")
+    assert str(label.spans[-2].style) == "#98c379"
+    assert str(label.spans[-1].style) == "#e06c75"

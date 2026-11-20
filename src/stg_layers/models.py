@@ -71,6 +71,18 @@ class FileChange:
     diff_text: str
     hunks: tuple[DiffHunk, ...]
 
+    @property
+    def insertions(self) -> int:
+        return sum(
+            line.startswith("+") for hunk in self.hunks for line in hunk.diff_text.splitlines()
+        )
+
+    @property
+    def deletions(self) -> int:
+        return sum(
+            line.startswith("-") for hunk in self.hunks for line in hunk.diff_text.splitlines()
+        )
+
 
 @dataclass(frozen=True)
 class Patch:
@@ -279,6 +291,8 @@ class TreeItem:
         label = Text()
         label.append(display_path, style="cyan")
         label.append(f" [{file.status.value}]", style=_FILE_STATUS_STYLES[file.status])
+        label.append(f" +{file.insertions}", style="#98c379")
+        label.append(f" -{file.deletions}", style="#e06c75")
         return cls(
             title=f"{section} / {path}",
             diff_text=file.diff_text,

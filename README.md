@@ -57,6 +57,11 @@ selecting a file moves all of its hunks. Patch contents, directories, and group
 nodes are left unchanged by Enter in the preview.
 Horizontal overflow is clipped in the tree to keep its scrollbar out of view.
 
+The repository refreshes automatically every two seconds when its patches, changes,
+branch, or remote URL change. Selection, expansion, and preview scroll are preserved
+where possible. Automatic refresh waits while a dialog or repository operation is
+active; **r** still refreshes manually.
+
 With the tree focused, **Enter** stages the selected file or hunk under
 **Unstaged changes**, and unstages the selected file or hunk under **Staged
 changes**. After Enter, selection advances to the next file or hunk in the

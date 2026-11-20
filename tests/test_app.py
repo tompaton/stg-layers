@@ -1,23 +1,32 @@
 import asyncio
+import threading
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from rich.text import Text
 from textual.widgets import Static, TextArea, Tree
 
 from stg_layers.app import StgLayersApp
+from stg_layers.commands import CommandRunner
 from stg_layers.dialogs import ConflictDialog, DeletePatchDialog, DiscardChangesDialog
 from stg_layers.errors import RepositoryError
+from stg_layers.git import Git
 from stg_layers.models import DiffHunk, FileChange, FileStatus, Patch, PatchStatus, hunk_key
-from stg_layers.repository import (
-    PatchChangeMoveResult,
-    PatchMoveResult,
-)
+from stg_layers.repository import PatchChangeMoveResult, PatchMoveResult, StGitRepository
 from stg_layers.tree_builder import TreeBuilder
 from stg_layers.tree_walker import walk_nodes
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Most tests trigger refresh explicitly; automatic-refresh tests opt into a short interval.
+    monkeypatch.setattr(StgLayersApp, "AUTO_REFRESH_INTERVAL", 3600.0)
+
+
 class FixtureRepository:
+    root = Path("/tmp/stg-layers-test")
+    remote_url: str | None = "https://example.com/stg-layers.git"
     branch: str | None = "feature/read-browser"
 
     def __init__(self) -> None:
@@ -38,6 +47,9 @@ class FixtureRepository:
         self.conflict_on_push = False
         self.pending_stash_reference: str | None = None
         self.restore_stash_conflict = False
+
+    def refresh_identity(self) -> None:
+        pass
 
     def has_conflicts(self) -> bool:
         return self.conflicted
@@ -1080,7 +1092,7 @@ def test_directory_grouping_compacts_single_directory_chains() -> None:
 
     for group in tree.root.children:
         assert [str(node.label) for node in group.children] == [
-            "README.md [modified]",
+            "README.md [modified] +1 -1",
             "branches",
             "pkg",
             "src/stg_layers",
@@ -1088,12 +1100,15 @@ def test_directory_grouping_compacts_single_directory_chains() -> None:
         ]
         branches, pkg, src, tests = group.children[1:]
         assert [str(node.label) for node in branches.children] == ["left", "right"]
-        assert [str(node.label) for node in pkg.children] == ["root.txt [modified]", "nested/deep"]
-        assert [str(node.label) for node in src.children] == [
-            "app.py [modified]",
-            "models.py [modified]",
+        assert [str(node.label) for node in pkg.children] == [
+            "root.txt [modified] +1 -1",
+            "nested/deep",
         ]
-        assert [str(node.label) for node in tests.children] == ["test_app.py [modified]"]
+        assert [str(node.label) for node in src.children] == [
+            "app.py [modified] +1 -1",
+            "models.py [modified] +1 -1",
+        ]
+        assert [str(node.label) for node in tests.children] == ["test_app.py [modified] +1 -1"]
         assert src.is_expanded
         assert src.data is not None and src.data.directory_path == "src/stg_layers"
         file = src.children[0]
@@ -1215,7 +1230,7 @@ def test_app_renders_patch_file_hunk_tree() -> None:
             assert hunk_node.data.patch_name == "types [notes]"
             assert hunk_node.data.file_path == "example [typing].py"
             assert hunk_node.data.hunk_index == 0
-            assert app.sub_title == "feature/read-browser"
+            assert app.sub_title == "https://example.com/stg-layers.git"
 
             assert patch_stack.is_expanded
             assert patch_node.is_expanded
@@ -2470,5 +2485,261 @@ def test_hunk_moves_between_current_patch_and_staged_follow_selection(
             assert len(repository.patch_files[0].hunks) == len(repository.staged[0].hunks) == 2
             assert tree.cursor_node is not None and tree.cursor_node.data is not None
             assert tree.cursor_node.data.hunk_key == key
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("under_home", [False, True])
+@pytest.mark.parametrize("branch", ["main", None])
+@pytest.mark.parametrize("remote_url", [None, "git@example.com:repo.git"])
+def test_repository_root_and_remote_title(
+    under_home: bool, branch: str | None, remote_url: str | None
+) -> None:
+    async def run_app() -> None:
+        repository = FixtureRepository()
+        repository.root = Path.home() / "dev/stg-layers" if under_home else Path("/tmp/repo [test]")
+        repository.branch = branch
+        repository.remote_url = remote_url
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            directory = "~/dev/stg-layers" if under_home else "/tmp/repo [test]"
+            assert str(tree.root.label) == f"Repository {directory} [{branch or 'detached HEAD'}]"
+            assert app.sub_title == (remote_url or "")
+            await pilot.press("r")
+            await pilot.pause()
+            assert str(tree.root.label) == f"Repository {directory} [{branch or 'detached HEAD'}]"
+
+    asyncio.run(run_app())
+
+
+def test_diff_preview_resets_scroll_when_changing_items() -> None:
+    class LongDiffRepository(FixtureRepository):
+        def load_staged_changes(self) -> tuple[FileChange, ...]:
+            text = "\n".join("+" + "x" * 200 for _ in range(100))
+            return tuple(
+                replace(self._file_change(path, "before", "after"), diff_text=text)
+                for path in ("one.txt", "two.txt")
+            )
+
+    async def run_app() -> None:
+        app = StgLayersApp(LongDiffRepository())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            preview = app.query_one("#diff-view", TextArea)
+            files = tree.root.children[1].children
+            tree.focus()
+            tree.move_cursor(files[0])
+            await pilot.pause()
+            for node in (files[1], files[0]):
+                preview.scroll_to(x=40, y=40, animate=False, immediate=True)
+                await pilot.pause()
+                assert preview.scroll_x > 0 and preview.scroll_y > 0
+                tree.move_cursor(node)
+                await pilot.pause()
+                assert preview.scroll_x == preview.scroll_y == 0
+                assert tree.cursor_node is node
+
+    asyncio.run(run_app())
+
+
+async def _select_first_staged_file(app: StgLayersApp, pilot) -> tuple[Tree, TextArea]:
+    tree = app.query_one("#patch-tree", Tree)
+    tree.focus()
+    file = next(
+        node
+        for node in walk_nodes(tree.root)
+        if node.data and node.data.is_staged and node.data.is_file
+    )
+    file.expand()
+    await pilot.pause()
+    tree.move_cursor(file)
+    await pilot.pause()
+    return tree, app.query_one("#diff-view", TextArea)
+
+
+def test_periodic_refresh_detects_changes_without_disturbing_unchanged_selection() -> None:
+    async def run_app() -> None:
+        fixture = FixtureRepository()
+        long_file = replace(
+            fixture._file_change("selected.txt", "old", "new"),
+            diff_text="\n".join("+" + "x" * 200 for _ in range(100)),
+        )
+        repository = MutableFixtureRepository(staged=(long_file,))
+        app = StgLayersApp(repository)
+        app.AUTO_REFRESH_INTERVAL = 0.1
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree, preview = await _select_first_staged_file(app, pilot)
+            preview.scroll_to(x=30, y=30, animate=False, immediate=True)
+            await pilot.pause()
+            offset = preview.scroll_offset
+            repository.staged.append(fixture._file_change("new.txt", "old", "new"))
+            await pilot.pause(0.4)
+            assert any(
+                node.data and node.data.file_path == "new.txt" for node in walk_nodes(tree.root)
+            )
+            assert tree.cursor_node is not None and tree.cursor_node.data is not None
+            assert tree.cursor_node.data.file_path == "selected.txt"
+            assert tree.cursor_node.is_expanded
+            assert preview.scroll_offset == offset
+            selected = tree.cursor_node
+            app._show_status("Keep this status")
+            await pilot.pause(0.3)
+            assert tree.cursor_node is selected
+            assert str(app.query_one("#status", Static).render()) == "Keep this status"
+            repository.staged[0] = replace(long_file, diff_text=long_file.diff_text + "\n+new line")
+            await pilot.pause(0.4)
+            assert preview.text.endswith("+new line")
+            assert preview.scroll_offset == offset
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("reason", ["dialog", "operation", "pending", "worker"])
+def test_automatic_refresh_waits_until_idle(reason: str) -> None:
+    async def run_app() -> None:
+        repository = MutableFixtureRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            original = app._loaded_data
+            repository.staged.append(repository._file_change("new.txt", "old", "new"))
+            release = asyncio.Event()
+            if reason == "dialog":
+                app.push_screen(DeletePatchDialog("example"))
+                await pilot.pause()
+            elif reason == "pending":
+                repository.pending_stash_reference = "saved"
+            elif reason == "worker":
+                app.run_worker(release.wait())
+            else:
+                app._repository_busy += 1
+            await app._refresh_changed_repository()
+            assert app._loaded_data == original
+            if reason == "dialog":
+                await pilot.press("escape")
+            elif reason == "pending":
+                repository.pending_stash_reference = None
+            elif reason == "worker":
+                release.set()
+                await app.workers.wait_for_complete()
+            else:
+                app._repository_busy -= 1
+            await app._refresh_changed_repository()
+            assert app._loaded_data != original
+
+    asyncio.run(run_app())
+
+
+def test_auto_refresh_error_keeps_tree_and_retries() -> None:
+    class FailingRefreshRepository(MutableFixtureRepository):
+        fail = False
+
+        def load_staged_changes(self) -> tuple[FileChange, ...]:
+            if self.fail:
+                raise RepositoryError("temporary read failure")
+            return super().load_staged_changes()
+
+    async def run_app() -> None:
+        repository = FailingRefreshRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            nodes = list(tree.root.children)
+            repository.fail = True
+            await app._refresh_changed_repository()
+            assert list(tree.root.children) == nodes
+            assert "temporary read failure" in str(app.query_one("#status", Static).render())
+            assert app._repository_busy == 0 and app._auto_refresh_done.is_set()
+            repository.fail = False
+            repository.staged.append(repository._file_change("new.txt", "old", "new"))
+            await app._refresh_changed_repository()
+            assert any(
+                node.data and node.data.file_path == "new.txt" for node in walk_nodes(tree.root)
+            )
+
+    asyncio.run(run_app())
+
+
+def test_refresh_detects_external_git_and_worktree_changes(tmp_path: Path) -> None:
+    git = Git(CommandRunner(tmp_path))
+    git.commands.run("git", "init", "-q")
+    git.commands.run("git", "config", "user.name", "Test")
+    git.commands.run("git", "config", "user.email", "test@example.invalid")
+    path = tmp_path / "file.txt"
+    path.write_text("before\n")
+    git.stage_files((path.name,))
+    git.commands.run("git", "commit", "-qm", "base")
+    git.commands.run("stg", "init")
+    path.write_text("dirty one\n")
+
+    async def run_app() -> None:
+        app = StgLayersApp(StGitRepository.discover(tmp_path))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.focus()
+            node = next(node for node in walk_nodes(tree.root) if node.data and node.data.is_file)
+            tree.move_cursor(node)
+            await pilot.pause()
+            path.write_text("dirty two\n")
+            await app._refresh_changed_repository()
+            await pilot.pause()
+            assert "+dirty two" in app.query_one("#diff-view", TextArea).text
+            git.stage_files((path.name,))
+            await app._refresh_changed_repository()
+            assert app._loaded_data is not None
+            assert len(app._loaded_data[1]) == 1 and not app._loaded_data[2]
+            git.commands.run("git", "checkout", "-b", "switched")
+            git.commands.run("stg", "init")
+            git.commands.run("git", "remote", "add", "origin", "git@example.com:repo.git")
+            await app._refresh_changed_repository()
+            assert "[switched]" in str(tree.root.label)
+            assert app.sub_title == "git@example.com:repo.git"
+            git.commands.run("stg", "new", "-m", "External patch", "external")
+            git.commands.run("stg", "refresh", "--index")
+            await app._refresh_changed_repository()
+            assert app._loaded_data is not None
+            assert app._loaded_data[0][0].name == "external"
+            assert app._loaded_data[1] == ()
+            git.commands.run("stg", "pop")
+            await app._refresh_changed_repository()
+            assert app._loaded_data is not None
+            assert app._loaded_data[0][0].status == PatchStatus.UNAPPLIED
+
+    asyncio.run(run_app())
+
+
+def test_repository_operation_waits_for_background_refresh() -> None:
+    class SlowRepository(MutableFixtureRepository):
+        pause_load = False
+        started = threading.Event()
+        release = threading.Event()
+
+        def load_staged_changes(self) -> tuple[FileChange, ...]:
+            if self.pause_load:
+                self.started.set()
+                assert self.release.wait(timeout=5)
+            return super().load_staged_changes()
+
+    async def run_app() -> None:
+        repository = SlowRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            repository.pause_load = True
+            refresh = asyncio.create_task(app._refresh_changed_repository())
+            assert await asyncio.to_thread(repository.started.wait, 5)
+            ready = asyncio.create_task(app._ensure_repository_ready())
+            await asyncio.sleep(0)
+            assert not ready.done()
+            repository.release.set()
+            await refresh
+            assert await ready
+            assert app._repository_busy == 0
 
     asyncio.run(run_app())

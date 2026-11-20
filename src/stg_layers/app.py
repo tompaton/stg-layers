@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from pathlib import Path
 from typing import Protocol
 
 from rich.text import Text
@@ -37,7 +38,11 @@ class PatchChangeMoveError(Exception):
 
 
 class StackReader(Protocol):
+    root: Path
     branch: str | None
+    remote_url: str | None
+
+    def refresh_identity(self) -> None: ...
 
     def has_conflicts(self) -> bool: ...
 
@@ -113,6 +118,7 @@ class StackReader(Protocol):
 
 class StgLayersApp(App[None]):
     TITLE = "StGit Layers"
+    AUTO_REFRESH_INTERVAL = 2.0
     CSS = """
     #main {
         height: 1fr;
@@ -157,9 +163,14 @@ class StgLayersApp(App[None]):
     def __init__(self, repository: StackReader) -> None:
         super().__init__()
         self.repository = repository
-        self.sub_title = repository.branch or "detached HEAD"
+        self.sub_title = repository.remote_url or ""
         self.newest_first = True
         self._conflict_locked = False
+        self._repository_busy = 0
+        self._auto_refresh_done = asyncio.Event()
+        self._auto_refresh_done.set()
+        self._shown_item: TreeItem | None = None
+        self._loaded_identity: tuple[str | None, str | None] | None = None
         self._loaded_data: (
             tuple[
                 tuple[Patch, ...],
@@ -217,7 +228,7 @@ class StgLayersApp(App[None]):
         yield Header()
         with Horizontal(id="main"):
             with Vertical(id="tree-pane"):
-                tree = LayerTree(Text("Repository", style="bold"), id="patch-tree")
+                tree = LayerTree(self._repository_label(), id="patch-tree")
                 tree.root.expand()
                 yield tree
             with Vertical(id="preview-pane"):
@@ -226,8 +237,33 @@ class StgLayersApp(App[None]):
         yield Static("Loading StGit stack...", id="status", markup=False)
         yield Footer()
 
+    def _repository_label(self) -> Text:
+        root = self.repository.root
+        home = Path.home()
+        directory = f"~/{root.relative_to(home)}" if root.is_relative_to(home) else str(root)
+        if root == home:
+            directory = "~"
+        branch = self.repository.branch or "detached HEAD"
+        return Text(f"Repository {directory} [{branch}]", style="bold")
+
     async def on_mount(self) -> None:
         await self._load_stack()
+        self.set_interval(self.AUTO_REFRESH_INTERVAL, self._refresh_changed_repository)
+
+    async def _refresh_changed_repository(self) -> None:
+        if (
+            self._repository_busy
+            or self.workers
+            or len(self.screen_stack) > 1
+            or self._conflict_locked
+            or self.repository.stack_operation_pending
+        ):
+            return
+        self._auto_refresh_done.clear()
+        try:
+            await self._load_stack(only_if_changed=True)
+        finally:
+            self._auto_refresh_done.set()
 
     @on(Tree.NodeSelected)
     def on_tree_node_selected(self, event: Tree.NodeSelected[TreeItem]) -> None:
@@ -238,11 +274,20 @@ class StgLayersApp(App[None]):
         self._show_tree_item(event.node.data)
 
     def _show_tree_item(self, item: TreeItem | None) -> None:
-        if item is None:
+        if item is None or item == self._shown_item:
             return
+        same_selection = (
+            self._shown_item is not None and item.selection_key == self._shown_item.selection_key
+        )
+        self._shown_item = item
         self.query_one("#selection-title", Static).update(item.title)
         preview = self.query_one("#diff-view", TextArea)
+        scroll = preview.scroll_offset
         preview.load_text(item.diff_text or "No text diff available.")
+        if same_selection:
+            preview.scroll_to(scroll.x, scroll.y, animate=False, immediate=True)
+        else:
+            preview.scroll_home(animate=False, immediate=True)
 
     def _show_status(self, message: str) -> None:
         self.query_one("#status", Static).update(message)
@@ -251,8 +296,15 @@ class StgLayersApp(App[None]):
         self,
         preferred_selection: TreeItem | None = None,
         expansion_fallback_path: str | None = None,
+        *,
+        only_if_changed: bool = False,
     ) -> None:
-        async with self._report_repository_errors(on_error=self._show_error):
+        async def on_error(error: RepositoryError) -> None:
+            self._loaded_data = None
+            if not only_if_changed:
+                await self._show_error(error)
+
+        async with self._report_repository_errors(on_error=on_error):
             if await asyncio.to_thread(self.repository.has_conflicts):
                 self._conflict_locked = True
                 self._show_status("Merge conflicts detected; repository operations are locked.")
@@ -262,13 +314,22 @@ class StgLayersApp(App[None]):
                 )
                 return
             self._conflict_locked = False
-            self._show_status("Loading patch stack and working changes...")
-            patches, staged, unstaged = await asyncio.gather(
+            if not only_if_changed:
+                self._show_status("Loading patch stack and working changes...")
+            patches, staged, unstaged, _ = await asyncio.gather(
                 asyncio.to_thread(self.repository.load_stack),
                 asyncio.to_thread(self.repository.load_staged_changes),
                 asyncio.to_thread(self.repository.load_unstaged_changes),
+                asyncio.to_thread(self.repository.refresh_identity),
             )
-            self._loaded_data = patches, staged, unstaged
+            data = patches, staged, unstaged
+            identity = self.repository.branch, self.repository.remote_url
+            if only_if_changed and data == self._loaded_data and identity == self._loaded_identity:
+                return
+            self._loaded_data = data
+            self._loaded_identity = identity
+            self.sub_title = self.repository.remote_url or ""
+            self.query_one("#patch-tree", LayerTree).root.set_label(self._repository_label())
             self.query_one("#patch-tree", LayerTree).populate(
                 patches,
                 staged,
@@ -290,6 +351,7 @@ class StgLayersApp(App[None]):
         tree.root.add("Unable to load StGit stack", allow_expand=False)
 
     async def _ensure_repository_ready(self) -> bool:
+        await self._auto_refresh_done.wait()
         if self._conflict_locked:
             return False
         async with self._report_repository_errors():
@@ -319,12 +381,15 @@ class StgLayersApp(App[None]):
         on_error: Callable[[RepositoryError], Awaitable[None]] | None = None,
     ) -> AsyncGenerator[None]:
         """Report repository failures and optionally run recovery or cleanup."""
+        self._repository_busy += 1
         try:
             yield
         except RepositoryError as error:
             self._show_status(f"Error: {error}")
             if on_error is not None:
                 await on_error(error)
+        finally:
+            self._repository_busy -= 1
 
     def _handle_repository_conflict_error(self) -> AbstractAsyncContextManager[None]:
         async def handle_error(error: RepositoryError) -> None:

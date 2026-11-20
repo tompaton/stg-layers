@@ -1644,3 +1644,16 @@ def test_hunk_move_failure_restores_index(
     assert git.commands.run("git", "write-tree") == index
     assert git.commands.run("git", "rev-parse", "HEAD") == head
     assert path.read_bytes() == worktree
+
+
+def test_discover_loads_repository_identity_from_subdirectory(
+    hunk_repository: StGitRepository,
+) -> None:
+    root = hunk_repository.root
+    hunk_repository.commands.run("git", "remote", "add", "origin", "git@example.com:repo.git")
+    nested = root / "nested"
+    nested.mkdir()
+    repository = StGitRepository.discover(nested)
+    assert repository.root == root
+    assert repository.branch == hunk_repository.git.current_branch()
+    assert repository.remote_url == "git@example.com:repo.git"
