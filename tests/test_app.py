@@ -6,7 +6,7 @@ from rich.text import Text
 from textual.widgets import Static, TextArea, Tree
 
 from stg_layers.app import StgLayersApp
-from stg_layers.dialogs import ConflictDialog, DeletePatchDialog
+from stg_layers.dialogs import ConflictDialog, DeletePatchDialog, DiscardChangesDialog
 from stg_layers.errors import RepositoryError
 from stg_layers.models import DiffHunk, FileChange, FileStatus, Patch, PatchStatus, hunk_key
 from stg_layers.repository import (
@@ -22,6 +22,7 @@ class FixtureRepository:
 
     def __init__(self) -> None:
         self.actions: list[tuple[str, str, int | None]] = []
+        self.discarded_hunks: list[tuple[str, str]] = []
         self.created_messages: list[str] = []
         self.edited_patches: list[tuple[str, str]] = []
         self.moved_files: list[str] = []
@@ -99,6 +100,13 @@ class FixtureRepository:
             if result != PatchChangeMoveResult.MOVED:
                 break
         return result, target
+
+    def discard_files(self, paths: tuple[str, ...]) -> None:
+        self.actions.extend(("discard_files", path, None) for path in paths)
+
+    def discard_hunk(self, path: str, hunk_diff: str) -> None:
+        self.actions.append(("discard_hunk", path, None))
+        self.discarded_hunks.append((path, hunk_diff))
 
     def stage_hunk(self, path: str, hunk_index: int) -> None:
         self.actions.append(("stage_hunk", path, hunk_index))
@@ -2286,5 +2294,101 @@ def test_move_status_aborts_without_reloading(case: str, message: str) -> None:
             assert repository.loads == loads
             assert tree.cursor_node is selected
             assert repository.actions == repository.moved_files == repository.spilled_files == []
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("scope", ["group", "directory", "file", "hunk"])
+@pytest.mark.parametrize("reversed_order", [False, True])
+def test_discard_unstaged_selection_requires_confirmation(scope: str, reversed_order: bool) -> None:
+    async def run_app() -> None:
+        fixture = FixtureRepository()
+        paths = ("dir/one.txt", "dir/nested/two.txt", "outside.txt")
+        repository = MutableFixtureRepository(
+            unstaged=tuple(fixture._file_change(path, "before", "after") for path in paths),
+            staged=(fixture._file_change("staged.txt", "before", "after"),),
+        )
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.focus()
+            if reversed_order:
+                await pilot.press("shift+r")
+            group = next(
+                node
+                for node in tree.root.children
+                if node.data is not None and node.data.is_unstaged
+            )
+            directory = next(
+                node for node in group.children if node.data and node.data.is_directory
+            )
+            file = next(
+                node
+                for node in walk_nodes(directory)
+                if node.data and node.data.is_file and node.data.file_path == paths[0]
+            )
+            file.expand()
+            await pilot.pause()
+            selected = {
+                "group": group,
+                "directory": directory,
+                "file": file,
+                "hunk": file.children[0],
+            }[scope]
+            tree.move_cursor(selected)
+            await pilot.press("delete")
+            assert isinstance(app.screen, DiscardChangesDialog)
+            assert app.focused is app.screen.query_one("#cancel-delete")
+            assert repository.actions == []
+            await pilot.press("escape")
+            assert repository.actions == []
+            await pilot.press("delete")
+            await pilot.click("#cancel-delete")
+            assert repository.actions == []
+            await pilot.press("delete")
+            await pilot.click("#confirm-delete")
+            await pilot.pause()
+            expected = (
+                paths if scope == "group" else paths[:2] if scope == "directory" else paths[:1]
+            )
+            operation = "discard_hunk" if scope == "hunk" else "discard_files"
+            assert sorted(repository.actions) == sorted(
+                (operation, path, None) for path in expected
+            )
+            assert selected.data is not None
+            assert repository.discarded_hunks == (
+                [(paths[0], selected.data.diff_text)] if scope == "hunk" else []
+            )
+            assert repository.staged[0].path == "staged.txt"
+            assert not isinstance(app.screen, DiscardChangesDialog)
+
+    asyncio.run(run_app())
+
+
+def test_discard_error_preserves_selection_and_reports_status() -> None:
+    class FailedDiscardRepository(FixtureRepository):
+        def discard_files(self, paths: tuple[str, ...]) -> None:
+            raise RepositoryError("discard failed")
+
+    async def run_app() -> None:
+        repository = FailedDiscardRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.focus()
+            selected = next(
+                node
+                for node in walk_nodes(tree.root)
+                if node.data and node.data.is_unstaged and node.data.is_file
+            )
+            tree.move_cursor(selected)
+            await pilot.press("delete")
+            await pilot.click("#confirm-delete")
+            await pilot.pause()
+            assert tree.cursor_node is selected
+            assert str(app.query_one("#status", Static).render()) == "Error: discard failed"
+            assert repository.actions == []
 
     asyncio.run(run_app())

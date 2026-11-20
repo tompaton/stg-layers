@@ -120,6 +120,10 @@ them unapplied. Press **Delete** on a patch to open an **OK/Cancel** confirmatio
 before deleting it. These operations preserve local changes and use the same
 conflict recovery as reordering.
 
+Press **Delete** on an unstaged group, directory, file, or hunk to discard that
+selection after confirmation. Tracked files are restored from the index; untracked
+files are removed. Staged changes are preserved. Discard cannot be undone.
+
 On an unapplied patch node, press **p** to run `stg push <patch>`. On an applied
 or current patch node, press **Shift+P** to run `stg pop <patch>`. StGit applies
 or unapplies the selected patch and may reorder patches as needed. Staged,

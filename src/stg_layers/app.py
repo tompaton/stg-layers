@@ -11,7 +11,12 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Static, TextArea, Tree
 from textual.widgets._tree import TreeNode
 
-from stg_layers.dialogs import ConflictDialog, DeletePatchDialog, PatchMessageDialog
+from stg_layers.dialogs import (
+    ConflictDialog,
+    DeletePatchDialog,
+    DiscardChangesDialog,
+    PatchMessageDialog,
+)
 from stg_layers.diff_preview import DiffPreview
 from stg_layers.errors import RepositoryError
 from stg_layers.models import FileChange, Patch, PatchStatus, TreeItem
@@ -53,6 +58,10 @@ class StackReader(Protocol):
     def move_patch_changes(
         self, patch_name: str, paths: tuple[str, ...], *, toward_newer: bool
     ) -> tuple[PatchChangeMoveResult, str | None]: ...
+
+    def discard_files(self, paths: tuple[str, ...]) -> None: ...
+
+    def discard_hunk(self, path: str, hunk_diff: str) -> None: ...
 
     def stage_hunk(self, path: str, hunk_index: int) -> None: ...
 
@@ -437,6 +446,41 @@ class StgLayersApp(App[None]):
 
     def action_refresh_stack(self) -> None:
         self.run_worker(self._load_stack(), exclusive=True)
+
+    async def action_delete_selected(self) -> None:
+        node = self.query_one("#patch-tree", LayerTree).cursor_node
+        item = node.data if node is not None else None
+        if node is None or item is None or not item.is_unstaged:
+            await self.action_patch_operation("delete")
+            return
+        if not await self._ensure_repository_ready():
+            return
+        async with self._handle_move_status():
+            paths = self._move_paths(item, node)
+            selection = item.as_group_selection()
+            if item.is_file_or_hunk:
+                selection = next_change_selection(node, item) or selection
+
+            def confirmed(result: bool | None) -> None:
+                if result:
+                    self.run_worker(self._discard_changes(item, paths, selection), exclusive=True)
+
+            self.push_screen(DiscardChangesDialog(item.title), confirmed)
+
+    async def _discard_changes(
+        self, item: TreeItem, paths: tuple[str, ...], selection: TreeItem
+    ) -> None:
+        if not await self._ensure_repository_ready():
+            return
+        async with self._handle_repository_conflict_error():
+            self._show_status(f"Discarding unstaged changes in {item.title}...")
+            if item.is_hunk:
+                await asyncio.to_thread(
+                    self.repository.discard_hunk, item.require_file_path(), item.diff_text
+                )
+            else:
+                await asyncio.to_thread(self.repository.discard_files, paths)
+            await self._load_stack(preferred_selection=selection)
 
     async def action_patch_operation(self, operation: str) -> None:
         if not await self._ensure_repository_ready():

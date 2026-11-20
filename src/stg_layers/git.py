@@ -120,6 +120,22 @@ class Git:
         if paths:
             self.commands.run("git", "--literal-pathspecs", "restore", "--staged", "--", *paths)
 
+    def discard_files(self, paths: tuple[str, ...]) -> None:
+        for path in paths:
+            self.restore_worktree(path)
+
+    def discard_hunk(self, path: str, hunk_diff: str) -> None:
+        file = next((file for file in self.load_unstaged_changes() if file.path == path), None)
+        if file is None or not any(hunk.diff_text == hunk_diff for hunk in file.hunks):
+            raise RepositoryError(f"The selected hunk in {path!r} is no longer present.")
+        header_end = file.diff_text.index("@@ ")
+        header = "".join(
+            line
+            for line in file.diff_text[:header_end].splitlines(keepends=True)
+            if not line.startswith(("old mode ", "new mode "))
+        )
+        self.commands.run("git", "apply", "--reverse", input_text=header + hunk_diff)
+
     def staged_path_groups(self) -> tuple[tuple[str, ...], ...]:
         fields = self.commands.run(
             "git",

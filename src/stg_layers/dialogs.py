@@ -96,6 +96,16 @@ class DeletePatchDialog(ModalScreen[bool]):
         self.dismiss(True)
 
 
+class DiscardChangesDialog(DeletePatchDialog):
+    def compose(self) -> ComposeResult:
+        with Vertical(id="delete-dialog"):
+            yield Static(Text(f"Discard unstaged changes in {self.patch_name}?"))
+            yield Static("This cannot be undone. Staged changes will be kept.")
+            with Horizontal(id="delete-actions"):
+                yield Button("Cancel", id="cancel-delete")
+                yield Button("Discard", id="confirm-delete", variant="error")
+
+
 class ConflictDialog(ModalScreen[str | None]):
     BINDINGS = [
         Binding("escape", "quit", "Quit", show=False),

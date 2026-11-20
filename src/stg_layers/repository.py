@@ -562,6 +562,14 @@ class StGitRepository:
 
         self._restore_staged_changes(saved_changes)
 
+    def discard_files(self, paths: tuple[str, ...]) -> None:
+        self._ensure_patch_stack_is_safe()
+        self.git.discard_files(paths)
+
+    def discard_hunk(self, path: str, hunk_diff: str) -> None:
+        self._ensure_patch_stack_is_safe()
+        self.git.discard_hunk(path, hunk_diff)
+
     def stage_hunk(self, path: str, hunk_index: int) -> None:
         self.git.stage_hunk(path, hunk_index)
 

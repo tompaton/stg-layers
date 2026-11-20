@@ -20,7 +20,7 @@ class LayerTree(Tree[TreeItem]):
         Binding("C,shift+c", "patch_operation('uncommit')", "Uncommit", key_display="Shift+C"),
         Binding("h", "patch_operation('hide')", "Hide patch"),
         Binding("H,shift+h", "patch_operation('unhide')", "Unhide patch", key_display="Shift+H"),
-        Binding("delete", "patch_operation('delete')", "Delete patch"),
+        Binding("delete", "delete_selected", "Delete/discard"),
         Binding("e", "edit_patch", "Edit patch"),
         Binding("p", "patch_operation('push')", "Push patch"),
         Binding("P,shift+p", "patch_operation('pop')", "Pop patch", key_display="Shift+P"),
@@ -53,6 +53,9 @@ class LayerTree(Tree[TreeItem]):
 
     async def action_create_patch(self) -> None:
         await self.app.run_action("create_patch")
+
+    async def action_delete_selected(self) -> None:
+        await self.app.run_action("delete_selected")
 
     async def action_patch_operation(self, operation: str) -> None:
         await self.app.run_action(f"patch_operation('{operation}')")
