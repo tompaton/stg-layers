@@ -1,9 +1,7 @@
 # StGit Layers
 
-A Textual browser for StGit repositories. It displays the patch stack,
-staged changes, and unstaged changes as expandable file/hunk trees, with a
-preview for the selected node. Files and individual text hunks in the staged
-and unstaged sections can be staged or unstaged from the tree.
+A Textual browser for StGit repositories, with a patch tree and a read-only diff
+preview. Stage, unstage, discard, and move files or individual hunks between layers.
 
 ## Requirements
 
@@ -21,127 +19,131 @@ cd /path/to/stgit-repository
 stg-layers
 ```
 
-The default tree order shows **Unstaged changes**, **Staged changes**, then
-**Patch stack**, with patches newest to oldest. Press **Shift+R** to reverse the
-order: patches oldest to newest, then staged and unstaged changes. The patch
-stack expands to patches > directories > files > hunks; staged and unstaged
-changes use the same directory grouping. Single-directory chains without files
-in intermediate directories are combined, for example `src/stg_layers`.
-On startup, sections, patches, and directories are expanded to show their files,
-while each file's hunks are collapsed. On a directory, **Enter** stages or unstages
-all its contained files, including files in collapsed subdirectories. **Ctrl+Up/Down**
-moves all those files in the displayed direction: between unstaged and staged
-changes, into or out of the current patch, or between adjacent applied patches.
-Selection follows the directory with the Ctrl shortcuts. Enter on a directory
-inside a patch leaves it unchanged. Directory transfers between patches use one
-transaction, so a failure or conflict can roll back the entire group through
-the existing Undo process. Other patches and local changes are preserved.
-On the **Staged changes** or **Unstaged changes** group node, Enter and
-Ctrl+Up/Down operate on every file in the group, including collapsed directories.
-Enter toggles staging; Ctrl follows the displayed direction and can move all
-staged files into the current patch. Empty groups are left unchanged.
-Non-ignored untracked files
-appear as additions in **Unstaged changes**.
+## Tree layout
 
-Use **Up/Down** to move between visible nodes. **Right** expands a node or moves
-to its first child; on a hunk, Right focuses the diff preview. **Left** collapses
-a node or moves to its parent. The preview
-updates as the highlighted node changes. Press **Tab** to move focus between
-the tree and read-only diff preview. The preview scrolls independently with
-Page Up/Page Down or the mouse wheel.
-While the preview is focused, **n** selects the next hunk and **p** the previous
-hunk in displayed tree order, including hunks inside collapsed files. Focus
-stays in the preview. **w** toggles word wrap, which starts off and keeps its
-setting as you navigate. **Enter** stages or unstages the selected file or hunk;
-selecting a file moves all of its hunks. Patch contents, directories, and group
-nodes are left unchanged by Enter in the preview.
-Horizontal overflow is clipped in the tree to keep its scrollbar out of view.
+The default order is **Unstaged changes → Staged changes → Patch stack**, with
+patches newest to oldest. The tree root shows the repository directory and branch;
+the title bar shows the remote URL, preferring `origin`.
 
-The repository refreshes automatically every two seconds when its patches, changes,
-branch, or remote URL change. Selection, expansion, and preview scroll are preserved
-where possible. Automatic refresh waits while a dialog or repository operation is
-active; **r** still refreshes manually.
+| Item | Display and scope |
+| --- | --- |
+| Change group | All staged or unstaged files, including files in collapsed directories. Non-ignored untracked files appear as unstaged additions. |
+| Patch | Expands into directories, files, and hunks. Labels show `[status patch-id] title`. |
+| Directory | Contains all descendant files. Directory chains without intermediate files are combined, e.g. `src/stg_layers`. |
+| File | Shows its status and insertion/deletion counts, e.g. `app.py [modified] +12-3`. File operations include all its hunks. |
+| Hunk | One text hunk. Hunk operations preserve the other hunks in the file. |
 
-With the tree focused, **Enter** stages the selected file or hunk under
-**Unstaged changes**, and unstages the selected file or hunk under **Staged
-changes**. After Enter, selection advances to the next file or hunk in the
-source group, making repeated presses useful for staging or unstaging a series
-of changes. **Ctrl+Down** also stages an unstaged file or hunk; on a staged file or hunk
-it moves the selected staged contents into the current patch. **Ctrl+Up**
-unstages a staged file or hunk; on a current-patch file or hunk it spills that selection
-into **Staged changes**. With the Ctrl shortcuts, selection follows the moved
-file or hunk. The preview refreshes after all these operations, and expanded
-file state is retained. Hunk actions preserve other hunks in the same file.
-File actions include untracked files. Enter and the staged / unstaged
-shortcuts update Git's index but leave working-tree contents and the patch
-stack unchanged. Patch-stack nodes are not modified by Enter. Press
-**n** while the tree is focused to edit StGit's
-new-patch message template; select **Create** to add an empty patch on top of
-the applied stack, or **Cancel**/Escape to leave the stack unchanged. Press
-**e** on a patch node to edit that patch's StGit-generated message template.
-Create applies the edited message to the selected patch; cancelling leaves it
-unchanged. Moving a staged file into the current patch temporarily preserves
-other staged files and leaves unstaged changes in the working tree. Spilling a
-current-patch file temporarily preserves other staged files; if the selected
-file already has staged changes, unstage those first. Hunk-level moves between
-the staged and unstaged sections are supported. In the reversed tree order,
-the Ctrl+Up and Ctrl+Down actions swap to follow the displayed direction:
-Ctrl+Up stages or moves toward the patch stack, while Ctrl+Down spills or
-unstages toward Unstaged changes. Press `r` to refresh repository state and
-`q` to quit.
+Sections, patches, and directories start expanded; file hunks start collapsed.
+Patch status markers are:
 
-On a patch node, **Ctrl+Up** moves it one position toward newer patches and
-**Ctrl+Down** moves it one position toward older patches; these actions swap in
-reversed order to continue following the displayed direction. At the top or
-bottom, the action does nothing. Patches cannot be moved across the applied /
-unapplied boundary. Before reordering, StGit Layers stashes staged, unstaged,
-and untracked changes, then restores them with their staged state after the
-operation. The stash is removed only after restoration succeeds. If reordering
-or restoring the changes causes a conflict, choose **Undo** to run
-`stg undo --hard`, restore the prior stack, and retry restoring the stash;
-**Quit** to resolve it in the terminal (the stash is retained); or **Refresh**
-after resolving it there. If a stash-restore conflict is resolved manually,
-the stash is retained as a backup. When the repository already has unresolved
-index conflicts, StGit Layers is locked behind a **Refresh**/**Quit** dialog
-until they are resolved.
+| Marker | Meaning |
+| --- | --- |
+| `>` | Current patch |
+| `+` | Applied patch |
+| `-` | Unapplied patch |
+| `~` | Hidden patch |
 
-On a file or hunk within an applied patch, **Ctrl+Up/Down** moves that file or
-selected hunk to the adjacent applied patch in that visual direction. The
-direction swaps with the tree order. File moves transfer all of the file's
-patch changes; hunk moves preserve the other hunks in the source patch. The
-selection follows the moved change, and moves do not cross the applied /
-unapplied boundary. A file in the current patch still spills to **Staged
-changes** when moving toward newer patches, where no applied destination
-exists. Local staged, unstaged, and untracked changes are stashed and restored
-with their staged state preserved for the entire transfer.
+## Keyboard commands
 
-On a patch node, press **c** to commit that patch into the stack's base using
-`stg commit <patch>`. StGit rearranges the stack as needed to commit the selected
-patch. Press **Shift+C** to convert the newest commit beneath the patch stack
-into one applied patch using `stg uncommit --number 1`; this works even with an
-empty stack. Press **h** to hide the selected patch, or **Shift+H** to unhide it.
-Hidden patches remain visible here with the `~` status marker; unhiding leaves
-them unapplied. Press **Delete** on a patch to open an **OK/Cancel** confirmation
-before deleting it. These operations preserve local changes and use the same
-conflict recovery as reordering.
+### General and tree navigation
 
-Press **Delete** on an unstaged group, directory, file, or hunk to discard that
-selection after confirmation. Tracked files are restored from the index; untracked
-files are removed. Staged changes are preserved. Discard cannot be undone.
+| Key | Focus / selected item | Action |
+| --- | --- | --- |
+| **q** | Either pane | Quit. |
+| **r** | Either pane | Refresh repository state. |
+| **Shift+R** | Either pane | Reverse tree order. Movement shortcuts continue to follow the displayed direction. |
+| **Tab / Shift+Tab** | Either pane | Move focus between the tree and diff preview. |
+| **Up / Down** | Tree | Select the previous / next visible node and update the preview. |
+| **Right** | Expandable tree node | Expand it, or move to its first child if already expanded. |
+| **Right** | Hunk | Focus the diff preview. |
+| **Left** | Tree | Collapse the node, or move to its parent. |
 
-On an unapplied patch node, press **p** to run `stg push <patch>`. On an applied
-or current patch node, press **Shift+P** to run `stg pop <patch>`. StGit applies
-or unapplies the selected patch and may reorder patches as needed. Staged,
-unstaged, and untracked changes are stashed and restored with the staged state
-preserved. If pushing, popping, or restoring the changes causes a conflict,
-the same Undo/Quit/Refresh recovery applies.
+### Stage, unstage, and discard
 
-Diff additions, removals, and hunk headers are syntax-highlighted.
-Preview line numbers are omitted because they are not source-file line numbers.
-Tree labels use bold section headings and distinct colors for patch statuses,
-patch names, file paths, and file statuses. Patch labels display as
-`[status patch-id] title`, with the status marker and patch ID sharing the
-status color: `>`, `+`, `-`, and `~`.
+These commands apply when the **tree** is focused.
+
+| Key | Selected item | Action |
+| --- | --- | --- |
+| **Enter** | Unstaged/Staged group, directory, file, or hunk | Stage/Unstage the selection. |
+| **Delete** | Unstaged group, directory, file, or hunk | Confirm, then discard the selection. Tracked files are restored from the index; untracked files are removed. Staged changes are preserved. **Discard cannot be undone.** |
+
+After Enter on a file or hunk, selection advances within the source group.
+On a group or directory, selection stays with that source group or directory.
+Empty groups are left unchanged. Staging and unstaging leave working-tree contents
+unchanged.
+
+### Move changes and reorder patches
+
+**Ctrl+Up / Ctrl+Down** move in the displayed direction. This table describes the
+**default tree order**; the two keys swap roles after **Shift+R**.
+
+| Selected item | Ctrl+Up — toward newer layers | Ctrl+Down — toward older layers |
+| --- | --- | --- |
+| Unstaged group, directory, file, or hunk | No move: already at the edge. | Stage the selection. |
+| Staged group, directory, file, or hunk | Unstage the selection. | Move the selection into the current patch. |
+| Current-patch directory, file, or hunk | Spill the selection into staged changes. | Move the selection into the adjacent older applied patch. |
+| Other applied-patch directory, file, or hunk | Move the selection into the adjacent newer applied patch. | Move the selection into the adjacent older applied patch. |
+| Unapplied or hidden patch contents | No move. | No move. |
+| Patch node | Reorder one position toward newer patches. | Reorder one position toward older patches. |
+
+Selection follows the moved item. Directory
+and group operations include all contained files, including collapsed descendants.
+Transfers and reordering stop at stack edges and do not cross the applied/unapplied
+boundary.
+
+Whole-file and directory spills require the selected paths to have no staged
+changes; unstage those changes first. Hunk moves between the current patch and
+staged changes preserve other staged and unstaged changes, including those in the
+same file.
+
+### Patch commands
+
+These commands apply when the **tree** is focused.
+
+| Key | Selected item | Action |
+| --- | --- | --- |
+| **n** | Any | Open the new-patch message editor. **Create** adds an empty patch on top of the applied stack. |
+| **e** | Patch | Open its message editor. **Create** applies the edited message. |
+| **p** | Unapplied patch | Push/apply the patch using `stg push`. StGit may reorder patches as needed. |
+| **Shift+P** | Applied or current patch | Pop/unapply the patch using `stg pop`. |
+| **c** | Patch | Commit the patch into the stack's base using `stg commit`. StGit rearranges the stack as needed. |
+| **Shift+C** | Any, including an empty stack | Convert the newest commit beneath the stack into one applied patch using `stg uncommit --number 1`. |
+| **h** | Patch | Hide the patch, unapplying it first if necessary. |
+| **Shift+H** | Patch | Unhide the patch, leaving it unapplied. |
+| **Delete** | Patch | Open an **OK/Cancel** confirmation before deleting it. |
+
+### Diff preview
+
+These commands apply when the **diff preview** is focused.
+
+| Key | Selected item | Action |
+| --- | --- | --- |
+| **n / p** | Any | Select the next / previous hunk in displayed tree order, including hunks in collapsed files. Focus stays in the preview. |
+| **Enter** | Unstaged/Staged file or hunk | Stage/Unstage the selection; selecting a file stages/unstages all its hunks. |
+| **w** | Any | Toggle word wrap in the diff preview. |
+| **Page Up / Page Down** | Any | Scroll the preview. The mouse wheel also scrolls. |
+| **Tab / Shift+Tab** | Any | Move focus back to the tree. |
+
+The preview is read-only. Insertions, deletions, and hunk headers are highlighted.
+
+### Conflict recovery
+
+If a stack operation fails (i.e. due to a merge conflict), a dialog is displayed:
+
+| Button | Action |
+| --- | --- |
+| **Undo** | Restore the prior stack with `stg undo --hard` and retry restoring saved local changes. |
+| **Refresh** | Check again after resolving the conflict in another terminal. |
+| **Quit / q / Escape** | Quit to resolve the conflict outside the app. Any recovery stash is retained. |
+
+Stack operations preserve staged, unstaged, and untracked changes. A recovery
+stash is removed only after successful restoration; if a stash conflict is
+resolved manually, the stash remains as a backup. Existing unresolved index
+conflicts lock repository operations behind a **Refresh/Quit** dialog.
+
+## Automatic refresh
+
+The repository is checked every two seconds for changes. 
 
 ## Development
 
