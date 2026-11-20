@@ -516,10 +516,13 @@ def test_conflict_after_nontransactional_error_does_not_offer_undo() -> None:
     asyncio.run(run_app())
 
 
-@pytest.mark.parametrize("selection", ["patch", "file"])
+@pytest.mark.parametrize("selection", ["patch", "file", "spill"])
 def test_move_error_aborts_dispatch_without_spilling(selection: str) -> None:
     class FailedMoveRepository(FixtureRepository):
         def move_patch_one_step(self, patch_name: str, *, toward_newer: bool) -> PatchMoveResult:
+            raise RepositoryError("move failed")
+
+        def spill_current_patch_files(self, paths: tuple[str, ...]) -> None:
             raise RepositoryError("move failed")
 
         def move_patch_change(
@@ -542,7 +545,7 @@ def test_move_error_aborts_dispatch_without_spilling(selection: str) -> None:
             selected = patch if selection == "patch" else patch.children[0]
             tree.focus()
             tree.move_cursor(selected)
-            await pilot.press("ctrl+up")
+            await pilot.press("ctrl+down" if selection == "file" else "ctrl+up")
             await pilot.pause()
             assert tree.cursor_node is selected
             assert str(app.query_one("#status", Static).render()) == "Error: move failed"

@@ -194,6 +194,12 @@ class StgLayersApp(App[None]):
             if child.data is not None and child.data.is_file
         )
 
+    def _get_selected_patch(self) -> Patch | None:
+        tree = self.query_one("#patch-tree", LayerTree)
+        node = tree.cursor_node
+        item = node.data if node is not None else None
+        return self._get_patch(item.patch_name) if item is not None and item.is_patch else None
+
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="main"):
@@ -386,13 +392,12 @@ class StgLayersApp(App[None]):
     async def action_edit_selected_patch(self) -> None:
         if not await self._ensure_repository_ready():
             return
-        tree = self.query_one("#patch-tree", LayerTree)
-        node = tree.cursor_node
-        item = node.data if node is not None else None
-        if item is None or not item.is_patch:
+
+        patch = self._get_selected_patch()
+        if patch is None:
             return
 
-        patch_name = item.require_patch_name()
+        patch_name = patch.name
         self._show_status(f"Preparing to edit patch {patch_name}...")
         async with self._handle_repository_conflict_error():
             template = await asyncio.to_thread(self.repository.edit_patch_template, patch_name)
@@ -440,38 +445,28 @@ class StgLayersApp(App[None]):
         if operation == "uncommit":
             await self._run_patch_operation(operation, None)
             return
-        else:
-            tree = self.query_one("#patch-tree", LayerTree)
-            node = tree.cursor_node
-            item = node.data if node is not None else None
-            if item is None or not item.is_patch:
-                self._show_status(f"Select a patch to {operation}.")
-                return
-            patch_name = item.require_patch_name()
 
-        if operation in {"push", "pop"}:
-            patch = self._get_patch(patch_name)
-            if patch is None:
-                return
-            if operation == "push" and patch.status != PatchStatus.UNAPPLIED:
-                self._show_status("Select an unapplied patch to push.")
-                return
-            if operation == "pop" and patch.status not in {
-                PatchStatus.APPLIED,
-                PatchStatus.CURRENT,
-            }:
-                self._show_status("Select an applied patch to pop.")
-                return
+        patch = self._get_selected_patch()
+        if patch is None:
+            self._show_status(f"Select a patch to {operation}.")
+            return
+
+        if operation == "push" and patch.status != PatchStatus.UNAPPLIED:
+            self._show_status("Select an unapplied patch to push.")
+            return
+
+        if operation == "pop" and patch.status not in {PatchStatus.APPLIED, PatchStatus.CURRENT}:
+            self._show_status("Select an applied patch to pop.")
+            return
+
+        patch_name = patch.name
+
+        def delete_callback(result: bool | None) -> None:
+            if result:
+                self.run_worker(self._run_patch_operation(operation, patch_name), exclusive=True)
 
         if operation == "delete":
-
-            def confirmed(result: bool | None) -> None:
-                if result:
-                    self.run_worker(
-                        self._run_patch_operation(operation, patch_name), exclusive=True
-                    )
-
-            self.push_screen(DeletePatchDialog(patch_name), confirmed)
+            self.push_screen(DeletePatchDialog(patch_name), delete_callback)
         else:
             await self._run_patch_operation(operation, patch_name)
 
@@ -493,30 +488,45 @@ class StgLayersApp(App[None]):
         await self._move_change(toward_newer=self.newest_first)
 
     async def action_apply_preview_change(self) -> None:
-        await self._move_change(allow_groups=False)
+        await self.action_apply_selected_change(allow_groups=False)
 
-    async def action_apply_selected_change(self) -> None:
-        await self._move_change()
-
-    async def _move_change(
-        self, *, toward_newer: bool | None = None, allow_groups: bool = True
-    ) -> None:
-        """Move in the given direction, or toggle staging when no direction is given."""
-        tree = self.query_one("#patch-tree", LayerTree)
-        node = tree.cursor_node
+    async def action_apply_selected_change(self, *, allow_groups: bool = True) -> None:
+        node = self.query_one("#patch-tree", LayerTree).cursor_node
         item = node.data if node is not None else None
         if node is None or item is None:
             return
         if not allow_groups and not item.is_file_or_hunk:
             return
-        # No direction means Enter: toggle staging without changing patch contents.
-        if toward_newer is None and not (item.is_staged or item.is_unstaged):
+        if item.is_staged or item.is_unstaged:
+            await self._move_change(toward_newer=item.is_staged, node=node, advance_selection=True)
+
+    async def _move_change(
+        self,
+        *,
+        toward_newer: bool,
+        node: TreeNode[TreeItem] | None = None,
+        advance_selection: bool = False,
+    ) -> None:
+        if node is None:
+            node = self.query_one("#patch-tree", LayerTree).cursor_node
+        item = node.data if node is not None else None
+        if node is None or item is None:
             return
         if not await self._ensure_repository_ready():
             return
         async with self._handle_repository_conflict_error():
             async with self._handle_move_status():
-                await self._dispatch_move(item, node, toward_newer=toward_newer)
+                selection = await self._dispatch_move(item, node, toward_newer=toward_newer)
+                if advance_selection:
+                    if item.is_file_group:
+                        selection = item.as_group_selection()
+                    else:
+                        selection = next_change_selection(node, item) or selection
+                path = item.file_path
+                await self._load_stack(
+                    preferred_selection=selection,
+                    expansion_fallback_path=path if selection.file_path == path else None,
+                )
 
     @asynccontextmanager
     async def _handle_move_status(self) -> AsyncGenerator[None]:
@@ -535,76 +545,39 @@ class StgLayersApp(App[None]):
             self._show_status(message)
 
     async def _dispatch_move(
-        self, item: TreeItem, node: TreeNode[TreeItem], *, toward_newer: bool | None
-    ) -> None:
-        if item.is_file_group:
-            paths = self._selected_paths(node)
-            if not paths:
-                raise MoveNotPerformed("No files to move in this group.")
-            selection = await self._move_file_group(item, paths, toward_newer)
-            if toward_newer is None:
-                selection = item.as_group_selection()
-        elif item.is_patch:
-            selection = await self._reorder_selected_patch(item, toward_newer=bool(toward_newer))
-        elif item.is_patch_change:
-            selection = await self._move_selected_patch_change(
-                item, toward_newer=bool(toward_newer)
-            )
-        elif item.is_working_change:
-            if toward_newer is None or toward_newer == item.is_staged:
-                next_selection = next_change_selection(node, item) if toward_newer is None else None
-                selection = await self._move_file_between_changes(item, stage=item.is_unstaged)
-                selection = next_selection or selection
-            elif item.is_staged and item.is_file:
-                selection = await self._move_staged_file_to_current_patch(item)
-            else:
-                return
-        else:
-            return
-
-        path = item.file_path
-        await self._load_stack(
-            preferred_selection=selection,
-            expansion_fallback_path=path if selection.file_path == path else None,
-        )
-
-    async def _move_file_group(
-        self, item: TreeItem, paths: tuple[str, ...], toward_newer: bool | None
+        self,
+        item: TreeItem,
+        node: TreeNode[TreeItem],
+        *,
+        toward_newer: bool,
     ) -> TreeItem:
-        label = item.directory_path or item.title
-        self._show_status(f"Moving files in {label}...")
-
-        if item.patch_name is not None:
-            return await self._move_patch_directory(item, paths, bool(toward_newer))
-        if item.is_unstaged:
+        if item.is_patch:
+            return await self._reorder_selected_patch(item, toward_newer=toward_newer)
+        elif item.is_unstaged:
             if toward_newer:
-                raise MoveNotPerformed("Unstaged changes are at the edge.")
-            await asyncio.to_thread(self.repository.stage_files, paths)
-            return item.as_selection(change_area="staged")
-        if toward_newer is None or toward_newer:
-            await asyncio.to_thread(self.repository.unstage_files, paths)
-            return item.as_selection(change_area="unstaged")
-        current = self._current_patch
-        if current is None:
-            raise MoveNotPerformed("There is no current patch to refresh.")
-        await asyncio.to_thread(self.repository.refresh_staged_files_to_current_patch, paths)
-        return item.as_selection(patch_name=current.name)
+                self._move_paths(item, node)
+                raise MoveNotPerformed(
+                    "Unstaged changes are at the edge." if item.is_file_group else ""
+                )
+            return await self._move_changes_between_areas(item, node)
+        elif item.is_staged:
+            if toward_newer:
+                return await self._move_changes_between_areas(item, node)
+            else:
+                return await self._move_staged_changes_to_current_patch(item, node)
+        elif item.patch_name is not None:
+            if self._is_current(item) and toward_newer:
+                return await self._spill_current_patch_changes(item, node)
+            else:
+                return await self._move_patch_changes(item, node, toward_newer=toward_newer)
 
-    async def _move_patch_directory(
-        self, item: TreeItem, paths: tuple[str, ...], toward_newer: bool
-    ) -> TreeItem:
-        patch = self._get_patch(item.patch_name)
-        if patch is None:
-            raise MoveNotPerformed()
-        if patch.status == PatchStatus.CURRENT and toward_newer:
-            await asyncio.to_thread(self.repository.spill_current_patch_files, paths)
-            return item.as_selection(change_area="staged")
-        result, target = await asyncio.to_thread(
-            self.repository.move_patch_changes, patch.name, paths, toward_newer=toward_newer
-        )
-        if result != PatchChangeMoveResult.MOVED:
-            raise PatchChangeMoveError(result, patch.name)
-        return item.as_selection(patch_name=target)
+        raise MoveNotPerformed()
+
+    def _move_paths(self, item: TreeItem, node: TreeNode[TreeItem]) -> tuple[str, ...]:
+        paths = self._selected_paths(node) if item.is_file_group else (item.require_file_path(),)
+        if not paths:
+            raise MoveNotPerformed("No files to move in this group.")
+        return paths
 
     async def _reorder_selected_patch(self, item: TreeItem, *, toward_newer: bool) -> TreeItem:
         patch_name = item.require_patch_name()
@@ -626,71 +599,76 @@ class StgLayersApp(App[None]):
             )
         return item.as_selection()
 
-    async def _move_selected_patch_change(self, item: TreeItem, *, toward_newer: bool) -> TreeItem:
+    async def _move_patch_changes(
+        self, item: TreeItem, node: TreeNode[TreeItem], *, toward_newer: bool
+    ) -> TreeItem:
+        paths = self._move_paths(item, node)
         source_patch = self._get_patch(item.patch_name)
         if source_patch is None:
             raise MoveNotPerformed()
         patch_name = source_patch.name
-        path = item.require_file_path()
-        change_name = "hunk" if item.is_hunk else "file"
         direction = "newer" if toward_newer else "older"
-        self._show_status(f"Moving {change_name} {path} {direction} from patch {patch_name}...")
-        result, moved_to = await asyncio.to_thread(
-            self.repository.move_patch_change,
-            patch_name,
-            path,
-            toward_newer=toward_newer,
-            hunk_diff=item.diff_text if item.is_hunk else None,
-        )
-
+        self._show_status(f"Moving {item.title} {direction} from patch {patch_name}...")
+        if item.is_hunk:
+            result, moved_to = await asyncio.to_thread(
+                self.repository.move_patch_change,
+                patch_name,
+                item.require_file_path(),
+                toward_newer=toward_newer,
+                hunk_diff=item.diff_text,
+            )
+        else:
+            result, moved_to = await asyncio.to_thread(
+                self.repository.move_patch_changes,
+                patch_name,
+                paths,
+                toward_newer=toward_newer,
+            )
         if result != PatchChangeMoveResult.MOVED:
-            if (
-                result
-                in {
-                    PatchChangeMoveResult.STACK_EDGE,
-                    PatchChangeMoveResult.APPLICATION_BOUNDARY,
-                }
-                and toward_newer
-                and self._is_current(item)
-                and item.is_file
-            ):
-                return await self._spill_current_patch_file(item)
             raise PatchChangeMoveError(result, patch_name)
         if moved_to is None:
-            raise MoveNotPerformed(f"Could not determine the destination patch for {path}.")
+            raise MoveNotPerformed(f"Could not determine the destination patch for {item.title}.")
         return item.as_selection(patch_name=moved_to)
 
-    async def _move_file_between_changes(self, item: TreeItem, *, stage: bool) -> TreeItem:
-        expected_area = "unstaged" if stage else "staged"
+    async def _move_changes_between_areas(
+        self, item: TreeItem, node: TreeNode[TreeItem]
+    ) -> TreeItem:
+        stage = item.is_unstaged
         target_area = "staged" if stage else "unstaged"
-        if item.change_area != expected_area:
-            raise MoveNotPerformed()
-        path = item.require_file_path()
+        paths = self._move_paths(item, node)
 
         verb = "Staging" if stage else "Unstaging"
-        target = "hunk" if item.is_hunk else "file"
-        self._show_status(f"{verb} {target} {path}...")
+        target = "hunk" if item.is_hunk else "files"
+        self._show_status(f"{verb} {target} in {item.title}...")
         if item.hunk_index is None:
             operation = self.repository.stage_files if stage else self.repository.unstage_files
-            await asyncio.to_thread(operation, (path,))
+            await asyncio.to_thread(operation, paths)
         else:
             operation = self.repository.stage_hunk if stage else self.repository.unstage_hunk
-            await asyncio.to_thread(operation, path, item.hunk_index)
+            await asyncio.to_thread(operation, item.require_file_path(), item.hunk_index)
 
         preferred_selection = item.as_selection(change_area=target_area)
         return preferred_selection
 
-    async def _move_staged_file_to_current_patch(self, item: TreeItem) -> TreeItem:
+    async def _move_staged_changes_to_current_patch(
+        self, item: TreeItem, node: TreeNode[TreeItem]
+    ) -> TreeItem:
+        if item.is_hunk:
+            raise MoveNotPerformed()
+        paths = self._move_paths(item, node)
         current_patch = self._current_patch
         if current_patch is None:
             raise MoveNotPerformed("There is no current patch to refresh.")
-        path = item.require_file_path()
-        self._show_status(f"Moving staged file {path} into the current patch...")
-        await asyncio.to_thread(self.repository.refresh_staged_files_to_current_patch, (path,))
+        self._show_status(f"Moving {item.title} into the current patch...")
+        await asyncio.to_thread(self.repository.refresh_staged_files_to_current_patch, paths)
         return item.as_selection(patch_name=current_patch.name)
 
-    async def _spill_current_patch_file(self, item: TreeItem) -> TreeItem:
-        path = item.require_file_path()
-        self._show_status(f"Moving {path} out of the current patch...")
-        await asyncio.to_thread(self.repository.spill_current_patch_files, (path,))
+    async def _spill_current_patch_changes(
+        self, item: TreeItem, node: TreeNode[TreeItem]
+    ) -> TreeItem:
+        if item.is_hunk:
+            return await self._move_patch_changes(item, node, toward_newer=True)
+        paths = self._move_paths(item, node)
+        self._show_status(f"Moving {item.title} out of the current patch...")
+        await asyncio.to_thread(self.repository.spill_current_patch_files, paths)
         return item.as_selection(change_area="staged")

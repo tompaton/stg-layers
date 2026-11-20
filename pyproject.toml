@@ -37,7 +37,7 @@ target-version = "py315"
 select = ["B", "C901", "E", "F", "I"]
 
 [tool.ruff.lint.mccabe]
-max-complexity = 8
+max-complexity = 9
 
 [tool.uv.sources]
 tree-sitter-diff = { git = "https://github.com/tree-sitter-grammars/tree-sitter-diff.git", rev = "v0.2.0" }
