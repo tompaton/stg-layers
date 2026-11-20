@@ -1518,3 +1518,129 @@ def test_staged_worktree_hunk_can_refresh_an_earlier_patch(tmp_path: Path) -> No
     assert current_patch.name == "second"
     assert "+TODO left in worktree" in _run(tmp_path, environment, "git", "diff", "--", "other.txt")
     assert not _run(tmp_path, environment, "git", "diff", "--cached")
+
+
+@pytest.fixture
+def hunk_repository(tmp_path: Path) -> StGitRepository:
+    environment = _git_environment()
+    _run(tmp_path, environment, "git", "init", "-q")
+    (tmp_path / "text.txt").write_text("".join(f"line {i}\n" for i in range(100)))
+    (tmp_path / "other.txt").write_text("other\n")
+    _run(tmp_path, environment, "git", "add", ".")
+    _run(tmp_path, environment, "git", "commit", "-qm", "base")
+    _run(tmp_path, environment, "stg", "init")
+    _run(tmp_path, environment, "stg", "new", "-m", "Current", "current")
+    return StGitRepository(tmp_path)
+
+
+@pytest.mark.parametrize("spill", [False, True])
+@pytest.mark.parametrize("hunk_index", [0, 1])
+def test_move_current_patch_hunk_preserves_other_changes(
+    hunk_repository: StGitRepository, spill: bool, hunk_index: int
+) -> None:
+    repository = hunk_repository
+    git = repository.git
+    path = git.root / "text.txt"
+    base = path.read_text()
+    patched = base.replace("line 10\n", "patch first\nextra patch\n").replace(
+        "line 70\n", "patch second\n"
+    )
+    path.write_text(patched)
+    git.stage_files((path.name,))
+    repository.stg.refresh()
+    staged = patched.replace("line 30\n", "staged first\nextra staged\n").replace(
+        "line 90\n", "staged second\n"
+    )
+    path.write_text(staged)
+    (git.root / "other.txt").write_text("staged other\n")
+    git.stage_files((path.name, "other.txt"))
+    worktree = staged.replace("line 50\n", "unstaged\n")
+    path.write_text(worktree)
+    (git.root / "untracked.txt").write_text("untracked\n")
+    index = git.commands.run("git", "write-tree")
+    source = repository.load_stack()[0].files if spill else repository.load_staged_changes()
+    file = next(file for file in source if file.path == path.name)
+    assert len(file.hunks) == 2
+    selected = file.hunks[hunk_index].diff_text
+    if spill:
+        repository.spill_current_patch_hunk(path.name, selected)
+        expected = (
+            base.replace("line 70\n", "patch second\n")
+            if hunk_index == 0
+            else base.replace("line 10\n", "patch first\nextra patch\n")
+        )
+    else:
+        repository.refresh_staged_hunk_to_current_patch(path.name, selected)
+        expected = (
+            patched.replace("line 30\n", "staged first\nextra staged\n")
+            if hunk_index == 0
+            else patched.replace("line 90\n", "staged second\n")
+        )
+    assert git.commands.run("git", "show", "HEAD:text.txt") == expected
+    assert git.commands.run("git", "write-tree") == index
+    assert path.read_text() == worktree
+    assert (git.root / "other.txt").read_text() == "staged other\n"
+    assert (git.root / "untracked.txt").read_text() == "untracked\n"
+
+
+@pytest.mark.parametrize("addition", [False, True])
+def test_current_patch_added_or_deleted_hunk_round_trip(
+    hunk_repository: StGitRepository, addition: bool
+) -> None:
+    repository = hunk_repository
+    git = repository.git
+    path = git.root / ("added.txt" if addition else "other.txt")
+    if addition:
+        path.write_text("added\n")
+    else:
+        path.unlink()
+    git.stage_files((path.name,))
+    repository.stg.refresh()
+    original_head = git.commands.run("git", "rev-parse", "HEAD^{tree}")
+    index = git.commands.run("git", "write-tree")
+    file = next(file for file in repository.load_stack()[0].files if file.path == path.name)
+    repository.spill_current_patch_hunk(path.name, file.hunks[0].diff_text)
+    (staged,) = repository.load_staged_changes()
+    assert staged.path == path.name
+    assert git.commands.run("git", "write-tree") == index
+    assert path.exists() == addition
+    repository.refresh_staged_hunk_to_current_patch(path.name, staged.hunks[0].diff_text)
+    assert git.commands.run("git", "rev-parse", "HEAD^{tree}") == original_head
+    assert git.commands.run("git", "write-tree") == index
+    assert repository.load_staged_changes() == ()
+    assert path.exists() == addition
+
+
+@pytest.mark.parametrize("spill", [False, True])
+def test_hunk_move_failure_restores_index(
+    hunk_repository: StGitRepository, monkeypatch: pytest.MonkeyPatch, spill: bool
+) -> None:
+    repository = hunk_repository
+    git = repository.git
+    path = git.root / "text.txt"
+    path.write_text(path.read_text().replace("line 10\n", "changed\n"))
+    git.stage_files((path.name,))
+    if spill:
+        repository.stg.refresh()
+    source = repository.load_stack()[0].files if spill else repository.load_staged_changes()
+    file = next(file for file in source if file.path == path.name)
+    index = git.commands.run("git", "write-tree")
+    head = git.commands.run("git", "rev-parse", "HEAD")
+    worktree = path.read_bytes()
+
+    def fail_refresh() -> str:
+        raise RepositoryError("refresh failed")
+
+    monkeypatch.setattr(repository.stg, "refresh", fail_refresh)
+    operation = (
+        repository.spill_current_patch_hunk
+        if spill
+        else repository.refresh_staged_hunk_to_current_patch
+    )
+    with pytest.raises(RepositoryError, match="no longer present"):
+        operation(path.name, "stale hunk")
+    with pytest.raises(RepositoryError, match="refresh failed"):
+        operation(path.name, file.hunks[0].diff_text)
+    assert git.commands.run("git", "write-tree") == index
+    assert git.commands.run("git", "rev-parse", "HEAD") == head
+    assert path.read_bytes() == worktree

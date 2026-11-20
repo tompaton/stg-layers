@@ -1,4 +1,6 @@
 import codecs
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 
 from unidiff import PatchSet
@@ -80,6 +82,18 @@ def parse_diff(patch_name: str, output: str) -> tuple[FileChange, ...]:
     return tuple(files)
 
 
+def extract_hunk_diff(file: FileChange, hunk_diff: str) -> str:
+    if not any(hunk.diff_text == hunk_diff for hunk in file.hunks):
+        raise RepositoryError(f"The selected hunk in {file.path!r} is no longer present.")
+    header_end = file.diff_text.index("@@ ")
+    header = "".join(
+        line
+        for line in file.diff_text[:header_end].splitlines(keepends=True)
+        if not line.startswith(("old mode ", "new mode "))
+    )
+    return header + hunk_diff
+
+
 class Git:
     """Git status, diffs, staging, worktree, and stash operations."""
 
@@ -126,15 +140,26 @@ class Git:
 
     def discard_hunk(self, path: str, hunk_diff: str) -> None:
         file = next((file for file in self.load_unstaged_changes() if file.path == path), None)
-        if file is None or not any(hunk.diff_text == hunk_diff for hunk in file.hunks):
+        if file is None:
             raise RepositoryError(f"The selected hunk in {path!r} is no longer present.")
-        header_end = file.diff_text.index("@@ ")
-        header = "".join(
-            line
-            for line in file.diff_text[:header_end].splitlines(keepends=True)
-            if not line.startswith(("old mode ", "new mode "))
+        self.commands.run(
+            "git", "apply", "--reverse", input_text=extract_hunk_diff(file, hunk_diff)
         )
-        self.commands.run("git", "apply", "--reverse", input_text=header + hunk_diff)
+
+    @contextmanager
+    def temporary_index(self) -> Generator[None]:
+        """Start from HEAD, then restore the original index without changing worktree files."""
+        original_tree = self.commands.run("git", "write-tree").strip()
+        try:
+            self.commands.run("git", "read-tree", "HEAD")
+            yield
+        finally:
+            try:
+                self.commands.run("git", "read-tree", original_tree)
+            except RepositoryError as error:
+                raise RepositoryError(
+                    f"Could not restore the saved index tree {original_tree}: {error}"
+                ) from error
 
     def staged_path_groups(self) -> tuple[tuple[str, ...], ...]:
         fields = self.commands.run(

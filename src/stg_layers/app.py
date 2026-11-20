@@ -59,6 +59,10 @@ class StackReader(Protocol):
         self, patch_name: str, paths: tuple[str, ...], *, toward_newer: bool
     ) -> tuple[PatchChangeMoveResult, str | None]: ...
 
+    def refresh_staged_hunk_to_current_patch(self, path: str, hunk_diff: str) -> None: ...
+
+    def spill_current_patch_hunk(self, path: str, hunk_diff: str) -> None: ...
+
     def discard_files(self, paths: tuple[str, ...]) -> None: ...
 
     def discard_hunk(self, path: str, hunk_diff: str) -> None: ...
@@ -697,22 +701,30 @@ class StgLayersApp(App[None]):
     async def _move_staged_changes_to_current_patch(
         self, item: TreeItem, node: TreeNode[TreeItem]
     ) -> TreeItem:
-        if item.is_hunk:
-            raise MoveNotPerformed()
         paths = self._move_paths(item, node)
         current_patch = self._current_patch
         if current_patch is None:
             raise MoveNotPerformed("There is no current patch to refresh.")
         self._show_status(f"Moving {item.title} into the current patch...")
-        await asyncio.to_thread(self.repository.refresh_staged_files_to_current_patch, paths)
+        if item.is_hunk:
+            await asyncio.to_thread(
+                self.repository.refresh_staged_hunk_to_current_patch,
+                item.require_file_path(),
+                item.diff_text,
+            )
+        else:
+            await asyncio.to_thread(self.repository.refresh_staged_files_to_current_patch, paths)
         return item.as_selection(patch_name=current_patch.name)
 
     async def _spill_current_patch_changes(
         self, item: TreeItem, node: TreeNode[TreeItem]
     ) -> TreeItem:
-        if item.is_hunk:
-            return await self._move_patch_changes(item, node, toward_newer=True)
         paths = self._move_paths(item, node)
         self._show_status(f"Moving {item.title} out of the current patch...")
-        await asyncio.to_thread(self.repository.spill_current_patch_files, paths)
+        if item.is_hunk:
+            await asyncio.to_thread(
+                self.repository.spill_current_patch_hunk, item.require_file_path(), item.diff_text
+            )
+        else:
+            await asyncio.to_thread(self.repository.spill_current_patch_files, paths)
         return item.as_selection(change_area="staged")

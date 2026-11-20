@@ -61,9 +61,9 @@ With the tree focused, **Enter** stages the selected file or hunk under
 **Unstaged changes**, and unstages the selected file or hunk under **Staged
 changes**. After Enter, selection advances to the next file or hunk in the
 source group, making repeated presses useful for staging or unstaging a series
-of changes. **Ctrl+Down** also stages an unstaged file or hunk; on a staged file
-it moves that file's staged contents into the current patch. **Ctrl+Up**
-unstages a staged file or hunk; on a current-patch file it spills that file
+of changes. **Ctrl+Down** also stages an unstaged file or hunk; on a staged file or hunk
+it moves the selected staged contents into the current patch. **Ctrl+Up**
+unstages a staged file or hunk; on a current-patch file or hunk it spills that selection
 into **Staged changes**. With the Ctrl shortcuts, selection follows the moved
 file or hunk. The preview refreshes after all these operations, and expanded
 file state is retained. Hunk actions preserve other hunks in the same file.

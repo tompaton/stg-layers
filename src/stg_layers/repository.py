@@ -5,7 +5,7 @@ from typing import TypeVar
 
 from stg_layers.commands import CommandRunner
 from stg_layers.errors import RepositoryError
-from stg_layers.git import Git
+from stg_layers.git import Git, extract_hunk_diff
 from stg_layers.models import FileChange, Patch, PatchStatus
 from stg_layers.stg import StGit
 
@@ -561,6 +561,28 @@ class StGitRepository:
             raise
 
         self._restore_staged_changes(saved_changes)
+
+    def refresh_staged_hunk_to_current_patch(self, path: str, hunk_diff: str) -> None:
+        self._move_current_patch_hunk(path, hunk_diff, spill=False)
+
+    def spill_current_patch_hunk(self, path: str, hunk_diff: str) -> None:
+        self._move_current_patch_hunk(path, hunk_diff, spill=True)
+
+    def _move_current_patch_hunk(self, path: str, hunk_diff: str, *, spill: bool) -> None:
+        self._ensure_patch_stack_is_safe()
+        current = next(
+            (patch for patch in self.load_stack() if patch.status == PatchStatus.CURRENT), None
+        )
+        if current is None:
+            raise RepositoryError("There is no current patch to move a hunk to or from.")
+        files = current.files if spill else self.git.load_staged_changes()
+        file = next((file for file in files if file.path == path), None)
+        if file is None:
+            raise RepositoryError(f"The selected hunk in {path!r} is no longer present.")
+        selected_diff = extract_hunk_diff(file, hunk_diff)
+        with self.git.temporary_index():
+            self.git.apply_index_diff(selected_diff, reverse=spill)
+            self.stg.refresh()
 
     def discard_files(self, paths: tuple[str, ...]) -> None:
         self._ensure_patch_stack_is_safe()

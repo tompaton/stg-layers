@@ -101,6 +101,12 @@ class FixtureRepository:
                 break
         return result, target
 
+    def refresh_staged_hunk_to_current_patch(self, path: str, hunk_diff: str) -> None:
+        self.actions.append(("refresh_hunk", path, None))
+
+    def spill_current_patch_hunk(self, path: str, hunk_diff: str) -> None:
+        self.actions.append(("spill_hunk", path, None))
+
     def discard_files(self, paths: tuple[str, ...]) -> None:
         self.actions.extend(("discard_files", path, None) for path in paths)
 
@@ -278,6 +284,18 @@ class MutableFixtureRepository(FixtureRepository):
         super().spill_current_patch_files(paths)
         for path in paths:
             self._move_file(self.patch_files, self.staged, path)
+
+    def refresh_staged_hunk_to_current_patch(self, path: str, hunk_diff: str) -> None:
+        super().refresh_staged_hunk_to_current_patch(path, hunk_diff)
+        file = next(file for file in self.staged if file.path == path)
+        index = next(hunk.index for hunk in file.hunks if hunk.diff_text == hunk_diff)
+        self._move_hunk(self.staged, self.patch_files, path, index)
+
+    def spill_current_patch_hunk(self, path: str, hunk_diff: str) -> None:
+        super().spill_current_patch_hunk(path, hunk_diff)
+        file = next(file for file in self.patch_files if file.path == path)
+        index = next(hunk.index for hunk in file.hunks if hunk.diff_text == hunk_diff)
+        self._move_hunk(self.patch_files, self.staged, path, index)
 
 
 class PatchChangeFixtureRepository(FixtureRepository):
@@ -596,7 +614,7 @@ def test_rejected_patch_change_reports_status_without_reloading(
         async with app.run_test() as pilot:
             await pilot.pause()
             tree = app.query_one("#patch-tree", Tree)
-            # A hunk cannot spill into staged changes at the current-patch boundary.
+            # Rejected transfers between patches must not reload the tree.
             patch = tree.root.children[2].children[0]
             patch.expand()
             file = patch.children[0]
@@ -605,7 +623,7 @@ def test_rejected_patch_change_reports_status_without_reloading(
             tree.focus()
             await pilot.pause()
             tree.move_cursor(selected)
-            await pilot.press("ctrl+up")
+            await pilot.press("ctrl+down")
             await pilot.pause()
             assert tree.cursor_node is selected
             assert str(app.query_one("#status", Static).render()) == message
@@ -1749,7 +1767,7 @@ def test_edit_patch_is_ignored_when_a_file_is_selected_and_cancel_works() -> Non
     asyncio.run(run_app())
 
 
-def test_ctrl_down_moves_only_a_staged_file_to_the_current_patch() -> None:
+def test_ctrl_down_moves_staged_file_and_hunk_to_current_patch() -> None:
     async def run_app() -> None:
         repository = FixtureRepository()
         app = StgLayersApp(repository)
@@ -1776,7 +1794,7 @@ def test_ctrl_down_moves_only_a_staged_file_to_the_current_patch() -> None:
     asyncio.run(run_app())
 
 
-def test_ctrl_up_spills_only_a_current_patch_file() -> None:
+def test_ctrl_up_spills_current_patch_file_and_hunk() -> None:
     async def run_app() -> None:
         repository = FixtureRepository()
         app = StgLayersApp(repository)
@@ -2390,5 +2408,67 @@ def test_discard_error_preserves_selection_and_reports_status() -> None:
             assert tree.cursor_node is selected
             assert str(app.query_one("#status", Static).render()) == "Error: discard failed"
             assert repository.actions == []
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("spill", [False, True])
+@pytest.mark.parametrize("reversed_order", [False, True])
+def test_hunk_moves_between_current_patch_and_staged_follow_selection(
+    spill: bool, reversed_order: bool
+) -> None:
+    async def run_app() -> None:
+        fixture = FixtureRepository()
+        staged_hunks = tuple(
+            fixture._file_change("shared.py", "old", text).hunks[0]
+            for text in ("staged one", "staged two")
+        )
+        patch_hunks = tuple(
+            fixture._file_change("shared.py", "old", text).hunks[0]
+            for text in ("patch one", "patch two")
+        )
+        repository = MutableFixtureRepository(
+            staged=(MutableFixtureRepository._file_with_hunks("shared.py", staged_hunks),),
+            unstaged=(fixture._file_change("shared.py", "old", "unstaged"),),
+        )
+        repository.patch_files = [
+            MutableFixtureRepository._file_with_hunks("shared.py", patch_hunks)
+        ]
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.focus()
+            if reversed_order:
+                await pilot.press("shift+r")
+            source = next(
+                node
+                for node in walk_nodes(tree.root)
+                if node.data
+                and node.data.is_file
+                and (node.data.patch_name is not None if spill else node.data.is_staged)
+            )
+            source.expand()
+            await pilot.pause()
+            selected = source.children[0]
+            assert selected.data is not None
+            key = selected.data.hunk_key
+            tree.move_cursor(selected)
+            newer = "ctrl+down" if reversed_order else "ctrl+up"
+            older = "ctrl+up" if reversed_order else "ctrl+down"
+            await pilot.press(newer if spill else older)
+            await pilot.pause()
+            assert tree.cursor_node is not None and tree.cursor_node.data is not None
+            item = tree.cursor_node.data
+            assert item.hunk_key == key
+            assert item.is_staged if spill else item.patch_name == "types [notes]"
+            assert len(repository.patch_files[0].hunks) == (1 if spill else 3)
+            assert len(repository.staged[0].hunks) == (3 if spill else 1)
+            assert repository.unstaged[0].hunks[0].diff_text.endswith("+unstaged\n")
+            await pilot.press(older if spill else newer)
+            await pilot.pause()
+            assert len(repository.patch_files[0].hunks) == len(repository.staged[0].hunks) == 2
+            assert tree.cursor_node is not None and tree.cursor_node.data is not None
+            assert tree.cursor_node.data.hunk_key == key
 
     asyncio.run(run_app())
