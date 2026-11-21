@@ -7,6 +7,7 @@ from stg_layers.commands import CommandRunner
 from stg_layers.errors import RepositoryError
 from stg_layers.git import Git, extract_hunk_diff
 from stg_layers.models import FileChange, Patch, PatchStatus
+from stg_layers.partial_diff import HunkLineSelection
 from stg_layers.stg import StGit
 
 
@@ -591,6 +592,15 @@ class StGitRepository:
             self.git.apply_index_diff(selected_diff, reverse=spill)
             self.stg.refresh()
 
+    def patch_diffstat(self, patch_name: str) -> str:
+        return self.git.diffstat(self.stg.show(patch_name, binary=True))
+
+    def unstaged_diffstat(self, paths: tuple[str, ...], *, hunk_diff: str | None = None) -> str:
+        return self.git.unstaged_diffstat(paths, hunk_diff=hunk_diff)
+
+    def discarded_lines_diffstat(self, selection: HunkLineSelection) -> str:
+        return self.git.discarded_lines_diffstat(selection)
+
     def discard_files(self, paths: tuple[str, ...]) -> None:
         self._ensure_patch_stack_is_safe()
         self.git.discard_files(paths)
@@ -598,6 +608,14 @@ class StGitRepository:
     def discard_hunk(self, path: str, hunk_diff: str) -> None:
         self._ensure_patch_stack_is_safe()
         self.git.discard_hunk(path, hunk_diff)
+
+    def move_selected_lines(self, selection: HunkLineSelection, *, stage: bool) -> None:
+        self._ensure_patch_stack_is_safe()
+        self.git.move_selected_lines(selection, stage=stage)
+
+    def discard_selected_lines(self, selection: HunkLineSelection) -> None:
+        self._ensure_patch_stack_is_safe()
+        self.git.discard_selected_lines(selection)
 
     def stage_hunk(self, path: str, hunk_index: int) -> None:
         self.git.stage_hunk(path, hunk_index)

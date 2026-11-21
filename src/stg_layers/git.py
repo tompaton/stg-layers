@@ -9,6 +9,7 @@ from unidiff.errors import UnidiffParseError
 from stg_layers.commands import CommandRunner
 from stg_layers.errors import DiffError, RepositoryError
 from stg_layers.models import DiffHunk, FileChange, FileStatus
+from stg_layers.partial_diff import HunkLineSelection, selected_lines_patch
 
 
 def decode_git_path(path: str) -> str:
@@ -134,6 +135,62 @@ class Git:
         if paths:
             self.commands.run("git", "--literal-pathspecs", "restore", "--staged", "--", *paths)
 
+    def diffstat(self, diff: str) -> str:
+        if not any(line.startswith("diff --git ") for line in diff.splitlines()):
+            return "No changes."
+        return self.commands.run("git", "apply", "--stat", input_text=diff).rstrip()
+
+    def unstaged_diffstat(self, paths: tuple[str, ...], *, hunk_diff: str | None = None) -> str:
+        if hunk_diff is not None:
+            file = self._unstaged_file(paths[0])
+            return self.diffstat(extract_hunk_diff(file, hunk_diff))
+        tracked = tuple(path for path in paths if self.is_tracked(path))
+        diffs = []
+        if tracked:
+            diffs.append(
+                self.commands.run(
+                    "git",
+                    "--literal-pathspecs",
+                    "diff",
+                    "--binary",
+                    "--no-color",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--no-renames",
+                    "--",
+                    *tracked,
+                )
+            )
+        for path in paths:
+            if path not in tracked:
+                diffs.append(
+                    self.commands.run(
+                        "git",
+                        "--literal-pathspecs",
+                        "diff",
+                        "--no-index",
+                        "--binary",
+                        "--no-color",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--",
+                        "/dev/null",
+                        path,
+                        allowed_returncodes=(1,),
+                    )
+                )
+        return self.diffstat("".join(diffs))
+
+    def discarded_lines_diffstat(self, selection: HunkLineSelection) -> str:
+        file = self._unstaged_file(selection.path)
+        return self.diffstat(selected_lines_patch(file, selection, stage=False))
+
+    def _unstaged_file(self, path: str) -> FileChange:
+        file = next((file for file in self.load_unstaged_changes() if file.path == path), None)
+        if file is None:
+            raise RepositoryError(f"No changes remain for {path!r}.")
+        return file
+
     def discard_files(self, paths: tuple[str, ...]) -> None:
         for path in paths:
             self.restore_worktree(path)
@@ -235,6 +292,30 @@ class Git:
                 f"{error} Also failed to remove the temporary intent-to-add index "
                 f"entry for {path!r}: {cleanup_error}"
             ) from cleanup_error
+
+    def move_selected_lines(self, selection: HunkLineSelection, *, stage: bool) -> None:
+        files = self.load_unstaged_changes() if stage else self.load_staged_changes()
+        file = next((file for file in files if file.path == selection.path), None)
+        if file is None:
+            raise RepositoryError(f"No changes remain for {selection.path!r}.")
+        patch = selected_lines_patch(file, selection, stage=stage)
+        self.commands.run(
+            "git",
+            "apply",
+            "--cached",
+            "--unidiff-zero",
+            *(("--reverse",) if not stage else ()),
+            input_text=patch,
+        )
+
+    def discard_selected_lines(self, selection: HunkLineSelection) -> None:
+        file = next(
+            (file for file in self.load_unstaged_changes() if file.path == selection.path), None
+        )
+        if file is None:
+            raise RepositoryError(f"No changes remain for {selection.path!r}.")
+        patch = selected_lines_patch(file, selection, stage=False)
+        self.commands.run("git", "apply", "--reverse", "--unidiff-zero", input_text=patch)
 
     def stage_hunk(self, path: str, hunk_index: int) -> None:
         if hunk_index < 0:

@@ -2,7 +2,7 @@ from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static, TextArea
 
@@ -32,17 +32,18 @@ class PatchMessageDialog(ModalScreen[str | None]):
     }
     """
 
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, *, submit_label: str = "Create") -> None:
         super().__init__()
         self.message = message
+        self.submit_label = submit_label
 
     def compose(self) -> ComposeResult:
         with Vertical(id="patch-dialog"):
-            yield Static("Edit the patch message, then select Create.")
+            yield Static(f"Edit the patch message, then select {self.submit_label}.")
             yield TextArea(self.message, id="patch-message", soft_wrap=True)
             with Horizontal(id="patch-dialog-actions"):
                 yield Button("Cancel", id="cancel-patch")
-                yield Button("Create", id="create-patch", variant="primary")
+                yield Button(self.submit_label, id="create-patch", variant="primary")
 
     def on_mount(self) -> None:
         self.query_one("#patch-message", TextArea).focus()
@@ -64,22 +65,29 @@ class DeletePatchDialog(ModalScreen[bool]):
     DEFAULT_CSS = """
     DeletePatchDialog { align: center middle; }
     #delete-dialog {
-        width: 64;
+        width: 90;
+        max-width: 95%;
         height: auto;
+        max-height: 90%;
         border: round $warning;
         background: $surface;
         padding: 1 2;
     }
     #delete-actions { height: auto; align-horizontal: right; }
+    #delete-stat { height: auto; max-height: 50vh; margin: 1 0; }
+    #delete-stat Static { width: auto; min-width: 100%; }
     """
 
-    def __init__(self, patch_name: str) -> None:
+    def __init__(self, patch_name: str, *, diffstat: str = "") -> None:
         super().__init__()
         self.patch_name = patch_name
+        self.diffstat = diffstat
 
     def compose(self) -> ComposeResult:
         with Vertical(id="delete-dialog"):
             yield Static(Text(f"Delete patch {self.patch_name}?"))
+            with VerticalScroll(id="delete-stat"):
+                yield Static(Text(self.diffstat or "No changes.", no_wrap=True))
             with Horizontal(id="delete-actions"):
                 yield Button("Cancel", id="cancel-delete")
                 yield Button("OK", id="confirm-delete", variant="error")
@@ -101,6 +109,8 @@ class DiscardChangesDialog(DeletePatchDialog):
         with Vertical(id="delete-dialog"):
             yield Static(Text(f"Discard unstaged changes in {self.patch_name}?"))
             yield Static("This cannot be undone. Staged changes will be kept.")
+            with VerticalScroll(id="delete-stat"):
+                yield Static(Text(self.diffstat or "No changes.", no_wrap=True))
             with Horizontal(id="delete-actions"):
                 yield Button("Cancel", id="cancel-delete")
                 yield Button("Discard", id="confirm-delete", variant="error")

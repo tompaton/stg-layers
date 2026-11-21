@@ -21,6 +21,7 @@ from stg_layers.dialogs import (
 from stg_layers.diff_preview import DiffPreview
 from stg_layers.errors import RepositoryError
 from stg_layers.models import FileChange, Patch, PatchStatus, TreeItem
+from stg_layers.partial_diff import HunkLineSelection
 from stg_layers.repository import PatchChangeMoveResult, PatchMoveResult
 from stg_layers.tree_view import LayerTree
 from stg_layers.tree_walker import next_change_selection, walk_nodes
@@ -68,9 +69,19 @@ class StackReader(Protocol):
 
     def spill_current_patch_hunk(self, path: str, hunk_diff: str) -> None: ...
 
+    def patch_diffstat(self, patch_name: str) -> str: ...
+
+    def unstaged_diffstat(self, paths: tuple[str, ...], *, hunk_diff: str | None = None) -> str: ...
+
+    def discarded_lines_diffstat(self, selection: HunkLineSelection) -> str: ...
+
     def discard_files(self, paths: tuple[str, ...]) -> None: ...
 
     def discard_hunk(self, path: str, hunk_diff: str) -> None: ...
+
+    def move_selected_lines(self, selection: HunkLineSelection, *, stage: bool) -> None: ...
+
+    def discard_selected_lines(self, selection: HunkLineSelection) -> None: ...
 
     def stage_hunk(self, path: str, hunk_index: int) -> None: ...
 
@@ -283,8 +294,10 @@ class StgLayersApp(App[None]):
         self.query_one("#selection-title", Static).update(item.title)
         preview = self.query_one("#diff-view", TextArea)
         scroll = preview.scroll_offset
+        selection = preview.selection
         preview.load_text(item.diff_text or "No text diff available.")
         if same_selection:
+            preview.selection = selection
             preview.scroll_to(scroll.x, scroll.y, animate=False, immediate=True)
         else:
             preview.scroll_home(animate=False, immediate=True)
@@ -481,7 +494,7 @@ class StgLayersApp(App[None]):
             template = await asyncio.to_thread(self.repository.edit_patch_template, patch_name)
 
             await self.push_screen(
-                PatchMessageDialog(template),
+                PatchMessageDialog(template, submit_label="Update"),
                 lambda message: self._on_edited_patch_message(patch_name, message),
             )
 
@@ -524,7 +537,7 @@ class StgLayersApp(App[None]):
             return
         if not await self._ensure_repository_ready():
             return
-        async with self._handle_move_status():
+        async with self._handle_repository_conflict_error(), self._handle_move_status():
             paths = self._move_paths(item, node)
             selection = item.as_group_selection()
             if item.is_file_or_hunk:
@@ -534,7 +547,12 @@ class StgLayersApp(App[None]):
                 if result:
                     self.run_worker(self._discard_changes(item, paths, selection), exclusive=True)
 
-            self.push_screen(DiscardChangesDialog(item.title), confirmed)
+            diffstat = await asyncio.to_thread(
+                self.repository.unstaged_diffstat,
+                paths,
+                hunk_diff=item.diff_text if item.is_hunk else None,
+            )
+            self.push_screen(DiscardChangesDialog(item.title, diffstat=diffstat), confirmed)
 
     async def _discard_changes(
         self, item: TreeItem, paths: tuple[str, ...], selection: TreeItem
@@ -579,7 +597,9 @@ class StgLayersApp(App[None]):
                 self.run_worker(self._run_patch_operation(operation, patch_name), exclusive=True)
 
         if operation == "delete":
-            self.push_screen(DeletePatchDialog(patch_name), delete_callback)
+            async with self._handle_repository_conflict_error():
+                diffstat = await asyncio.to_thread(self.repository.patch_diffstat, patch_name)
+                self.push_screen(DeletePatchDialog(patch_name, diffstat=diffstat), delete_callback)
         else:
             await self._run_patch_operation(operation, patch_name)
 
@@ -600,6 +620,12 @@ class StgLayersApp(App[None]):
     async def action_move_change_up(self) -> None:
         await self._move_change(toward_newer=self.newest_first)
 
+    async def action_stage_selected_lines(self) -> None:
+        await self._move_change(toward_newer=False, lines_only=True)
+
+    async def action_remove_selected_lines(self) -> None:
+        await self._move_change(toward_newer=True, lines_only=True)
+
     async def action_apply_preview_change(self) -> None:
         await self.action_apply_selected_change(allow_groups=False)
 
@@ -619,27 +645,38 @@ class StgLayersApp(App[None]):
         toward_newer: bool,
         node: TreeNode[TreeItem] | None = None,
         advance_selection: bool = False,
+        lines_only: bool = False,
     ) -> None:
         if node is None:
             node = self.query_one("#patch-tree", LayerTree).cursor_node
-        item = node.data if node is not None else None
-        if node is None or item is None:
+        if node is None:
             return
-        if not await self._ensure_repository_ready():
+        item = self._shown_item if lines_only else node.data
+        if item is None:
             return
-        async with self._handle_repository_conflict_error():
-            async with self._handle_move_status():
-                selection = await self._dispatch_move(item, node, toward_newer=toward_newer)
-                if advance_selection:
-                    if item.is_file_group:
-                        selection = item.as_group_selection()
-                    else:
-                        selection = next_change_selection(node, item) or selection
-                path = item.file_path
-                await self._load_stack(
-                    preferred_selection=selection,
-                    expansion_fallback_path=path if selection.file_path == path else None,
-                )
+        if lines_only and (not item.is_working_change or (item.is_staged and not toward_newer)):
+            return
+        async with self._handle_repository_conflict_error(), self._handle_move_status():
+            line_selection = (
+                self.query_one("#diff-view", DiffPreview).selected_lines(item)
+                if lines_only
+                else None
+            )
+            if not await self._ensure_repository_ready():
+                return
+            selection = await self._dispatch_move(
+                item, node, toward_newer=toward_newer, line_selection=line_selection
+            )
+            if advance_selection:
+                if item.is_file_group:
+                    selection = item.as_group_selection()
+                else:
+                    selection = next_change_selection(node, item) or selection
+            path = item.file_path
+            await self._load_stack(
+                preferred_selection=selection,
+                expansion_fallback_path=path if selection.file_path == path else None,
+            )
 
     @asynccontextmanager
     async def _handle_move_status(self) -> AsyncGenerator[None]:
@@ -663,19 +700,25 @@ class StgLayersApp(App[None]):
         node: TreeNode[TreeItem],
         *,
         toward_newer: bool,
+        line_selection: HunkLineSelection | None = None,
     ) -> TreeItem:
         if item.is_patch:
             return await self._reorder_selected_patch(item, toward_newer=toward_newer)
         elif item.is_unstaged:
             if toward_newer:
+                if line_selection is not None:
+                    await self._confirm_discard_selected_lines(item, line_selection)
+                    raise MoveNotPerformed()
                 self._move_paths(item, node)
                 raise MoveNotPerformed(
                     "Unstaged changes are at the edge." if item.is_file_group else ""
                 )
-            return await self._move_changes_between_areas(item, node)
+            return await self._move_changes_between_areas(item, node, line_selection=line_selection)
         elif item.is_staged:
             if toward_newer:
-                return await self._move_changes_between_areas(item, node)
+                return await self._move_changes_between_areas(
+                    item, node, line_selection=line_selection
+                )
             else:
                 return await self._move_staged_changes_to_current_patch(item, node)
         elif item.patch_name is not None:
@@ -744,9 +787,18 @@ class StgLayersApp(App[None]):
         return item.as_selection(patch_name=moved_to)
 
     async def _move_changes_between_areas(
-        self, item: TreeItem, node: TreeNode[TreeItem]
+        self,
+        item: TreeItem,
+        node: TreeNode[TreeItem],
+        *,
+        line_selection: HunkLineSelection | None = None,
     ) -> TreeItem:
         stage = item.is_unstaged
+        if line_selection is not None:
+            await asyncio.to_thread(
+                self.repository.move_selected_lines, line_selection, stage=stage
+            )
+            return item.as_selection()
         target_area = "staged" if stage else "unstaged"
         paths = self._move_paths(item, node)
 
@@ -793,3 +845,26 @@ class StgLayersApp(App[None]):
         else:
             await asyncio.to_thread(self.repository.spill_current_patch_files, paths)
         return item.as_selection(change_area="staged")
+
+    async def _confirm_discard_selected_lines(
+        self, item: TreeItem, selection: HunkLineSelection
+    ) -> None:
+        def confirmed(result: bool | None) -> None:
+            if result:
+                self.run_worker(self._discard_selected_lines(item, selection), exclusive=True)
+
+        diffstat = await asyncio.to_thread(self.repository.discarded_lines_diffstat, selection)
+        self.push_screen(
+            DiscardChangesDialog(f"selected lines of {selection.path}", diffstat=diffstat),
+            confirmed,
+        )
+
+    async def _discard_selected_lines(self, item: TreeItem, selection: HunkLineSelection) -> None:
+        if not await self._ensure_repository_ready():
+            return
+        async with self._handle_repository_conflict_error():
+            self._show_status(f"Discarding selected lines in {selection.path}...")
+            await asyncio.to_thread(self.repository.discard_selected_lines, selection)
+            await self._load_stack(
+                preferred_selection=item.as_selection(), expansion_fallback_path=selection.path
+            )

@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 from rich.text import Text
-from textual.widgets import Static, TextArea, Tree
+from textual.containers import VerticalScroll
+from textual.widgets import Button, Static, TextArea, Tree
+from textual.widgets.text_area import Selection
 
 from stg_layers.app import StgLayersApp
 from stg_layers.commands import CommandRunner
@@ -13,6 +15,7 @@ from stg_layers.dialogs import ConflictDialog, DeletePatchDialog, DiscardChanges
 from stg_layers.errors import RepositoryError
 from stg_layers.git import Git
 from stg_layers.models import DiffHunk, FileChange, FileStatus, Patch, PatchStatus, hunk_key
+from stg_layers.partial_diff import HunkLineSelection
 from stg_layers.repository import PatchChangeMoveResult, PatchMoveResult, StGitRepository
 from stg_layers.tree_builder import TreeBuilder
 from stg_layers.tree_walker import walk_nodes
@@ -119,12 +122,29 @@ class FixtureRepository:
     def spill_current_patch_hunk(self, path: str, hunk_diff: str) -> None:
         self.actions.append(("spill_hunk", path, None))
 
+    def patch_diffstat(self, patch_name: str) -> str:
+        return f" {patch_name}.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)"
+
+    def unstaged_diffstat(self, paths: tuple[str, ...], *, hunk_diff: str | None = None) -> str:
+        return "\n".join(f" {path} | 2 +-" for path in paths)
+
+    def discarded_lines_diffstat(self, selection: HunkLineSelection) -> str:
+        return f" {selection.path} | 1 +\n 1 file changed, 1 insertion(+)"
+
     def discard_files(self, paths: tuple[str, ...]) -> None:
         self.actions.extend(("discard_files", path, None) for path in paths)
 
     def discard_hunk(self, path: str, hunk_diff: str) -> None:
         self.actions.append(("discard_hunk", path, None))
         self.discarded_hunks.append((path, hunk_diff))
+
+    def move_selected_lines(self, selection: HunkLineSelection, *, stage: bool) -> None:
+        self.actions.append(
+            ("stage_lines" if stage else "unstage_lines", selection.path, selection.first_line)
+        )
+
+    def discard_selected_lines(self, selection: HunkLineSelection) -> None:
+        self.actions.append(("discard_lines", selection.path, selection.first_line))
 
     def stage_hunk(self, path: str, hunk_index: int) -> None:
         self.actions.append(("stage_hunk", path, hunk_index))
@@ -1639,6 +1659,9 @@ def test_patch_management_shortcuts_and_delete_confirmation() -> None:
 
             await pilot.press("delete")
             assert isinstance(app.screen, DeletePatchDialog)
+            summary = app.screen.query_one("#delete-stat", VerticalScroll).query_one(Static)
+            assert "types [notes].txt" in str(summary.render())
+            assert "1 insertion(+)" in str(summary.render())
             assert len(repository.patch_operations) == 4
             await pilot.click("#cancel-delete")
             await pilot.pause()
@@ -2573,6 +2596,8 @@ def test_periodic_refresh_detects_changes_without_disturbing_unchanged_selection
         async with app.run_test() as pilot:
             await pilot.pause()
             tree, preview = await _select_first_staged_file(app, pilot)
+            preview.move_cursor((35, 0))
+            line_selection = preview.selection
             preview.scroll_to(x=30, y=30, animate=False, immediate=True)
             await pilot.pause()
             offset = preview.scroll_offset
@@ -2593,6 +2618,7 @@ def test_periodic_refresh_detects_changes_without_disturbing_unchanged_selection
             repository.staged[0] = replace(long_file, diff_text=long_file.diff_text + "\n+new line")
             await pilot.pause(0.4)
             assert preview.text.endswith("+new line")
+            assert preview.selection == line_selection
             assert preview.scroll_offset == offset
 
     asyncio.run(run_app())
@@ -2741,5 +2767,406 @@ def test_repository_operation_waits_for_background_refresh() -> None:
             await refresh
             assert await ready
             assert app._repository_busy == 0
+
+    asyncio.run(run_app())
+
+
+def test_diff_preview_arrows_move_cursor_and_shift_arrows_select() -> None:
+    async def run_app() -> None:
+        app = StgLayersApp(FixtureRepository())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            selected = tree.cursor_node
+            preview = app.query_one("#diff-view", TextArea)
+            text = "zero\none\ntwo\nthree\nfour\nfive"
+            preview.load_text(text)
+            preview.focus()
+            await pilot.pause()
+            assert preview.show_cursor and preview.highlight_cursor_line and preview.read_only
+            await pilot.press("down", "down")
+            assert preview.selected_text == "two"
+            await pilot.press("shift+down", "shift+down")
+            assert preview.selection.start == (2, 0)
+            assert preview.selection.end == (4, 4)
+            assert preview.selected_text == "two\nthree\nfour"
+            await pilot.press("shift+up")
+            assert preview.selected_text == "two\nthree"
+            await pilot.press("up")
+            assert preview.selected_text == "two"
+            await pilot.press("home", "right", "shift+right")
+            assert preview.selected_text == "two\nthree"
+            await pilot.press("shift+left")
+            assert preview.selected_text == "two"
+            await pilot.press("a", "backspace", "delete")
+            assert preview.text == text
+            assert preview.has_focus
+            assert tree.cursor_node is selected
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("soft_wrap", [False, True])
+def test_diff_preview_selects_whole_lines_at_boundaries_and_in_reverse(soft_wrap: bool) -> None:
+    async def run_app() -> None:
+        app = StgLayersApp(FixtureRepository())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            preview = app.query_one("#diff-view", TextArea)
+            lines = ["first", "long " * 50, "", "last"]
+            preview.load_text("\n".join(lines))
+            preview.soft_wrap = soft_wrap
+            preview.focus()
+            await pilot.pause()
+            preview.move_cursor((1, 5))
+            await pilot.press("shift+down")
+            assert preview.selected_text == lines[1] + "\n"
+            await pilot.press("shift+down")
+            assert preview.selected_text == lines[1] + "\n\nlast"
+            await pilot.press("shift+up", "shift+up")
+            assert preview.selected_text == lines[1]
+            await pilot.press("shift+up")
+            assert preview.selected_text == "first\n" + lines[1]
+            await pilot.press("shift+down")
+            assert preview.selected_text == lines[1]
+            preview.move_cursor((3, 2))
+            await pilot.press("shift+down", "shift+down")
+            assert preview.selected_text == "last"
+            await pilot.press("shift+up")
+            assert preview.selected_text == "\nlast"
+            # Mouse drags, word selection and other inherited selection actions also snap.
+            preview.selection = Selection((0, 2), (1, 3))
+            assert preview.selected_text == "first\n" + lines[1]
+            preview.selection = Selection((1, 3), (0, 2))
+            assert preview.selected_text == "first\n" + lines[1]
+            assert preview.selection.start == (1, len(lines[1]))
+            assert preview.selection.end == (0, 0)
+            await pilot.press("backspace", "delete", "a")
+            assert preview.text == "\n".join(lines)
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("soft_wrap", [False, True])
+def test_diff_preview_always_selects_current_line(soft_wrap: bool) -> None:
+    async def run_app() -> None:
+        app = StgLayersApp(FixtureRepository())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            preview = app.query_one("#diff-view", TextArea)
+            lines = ["first", "long " * 50, "last"]
+            preview.load_text("\n".join(lines))
+            preview.soft_wrap = soft_wrap
+            preview.focus()
+            await pilot.pause()
+            assert preview.selected_text == "first"
+            await pilot.press("up")
+            assert preview.selected_text == "first"
+            await pilot.press("down")
+            assert preview.selected_text == lines[1]
+            await pilot.press("shift+down")
+            assert preview.selected_text == lines[1] + "\nlast"
+            await pilot.press("shift+up")
+            assert preview.selected_text == lines[1]
+            await pilot.press("shift+up")
+            assert preview.selected_text == "first\n" + lines[1]
+            await pilot.press("shift+down")
+            assert preview.selected_text == lines[1]
+            await pilot.press("down", "down")
+            assert preview.selected_text == "last"
+            preview.move_cursor((0, 2))
+            assert preview.selected_text == "first"
+            preview.load_text("replacement\nsecond")
+            assert preview.selected_text == "replacement"
+            preview.load_text("")
+            await pilot.press("up", "down", "shift+up", "shift+down")
+            assert preview.text == ""
+
+    asyncio.run(run_app())
+
+
+@pytest.fixture
+def line_repository(tmp_path: Path) -> StGitRepository:
+    git = Git(CommandRunner(tmp_path))
+    git.commands.run("git", "init", "-q")
+    git.commands.run("git", "config", "user.name", "Test")
+    git.commands.run("git", "config", "user.email", "test@example.invalid")
+    (tmp_path / "src").mkdir()
+    path = tmp_path / "src/tracked.txt"
+    base = "".join(f"line {i}\n" for i in range(100))
+    path.write_text(base)
+    (tmp_path / "other.txt").write_text("other\n")
+    git.stage_files(("src/tracked.txt", "other.txt"))
+    git.commands.run("git", "commit", "-qm", "base")
+    git.commands.run("stg", "init")
+    path.write_text(
+        base.replace("line 10\nline 11\n", "new 10\nnew 11\n").replace("line 70\n", "new 70\n")
+    )
+    (tmp_path / "other.txt").write_text("other changed\n")
+    return StGitRepository.discover(tmp_path)
+
+
+@pytest.mark.parametrize("stage", [False, True])
+@pytest.mark.parametrize("scope", ["group", "directory", "file", "hunk"])
+def test_preview_keys_move_selected_lines_only(
+    line_repository: StGitRepository, stage: bool, scope: str
+) -> None:
+    repository = line_repository
+    git = repository.git
+    path = repository.root / "src/tracked.txt"
+    worktree = path.read_text()
+    base = git.commands.run("git", "show", "HEAD:src/tracked.txt")
+    if not stage:
+        git.stage_files(("src/tracked.txt", "other.txt"))
+    other_index = git.commands.run("git", "show", ":other.txt")
+
+    async def run_app() -> None:
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            area = "unstaged" if stage else "staged"
+            candidates = [
+                node
+                for node in walk_nodes(tree.root)
+                if node.data and node.data.change_area == area
+            ]
+            selected = next(
+                node
+                for node in candidates
+                if node.data
+                and {
+                    "group": node.data.is_change_group,
+                    "directory": node.data.is_directory,
+                    "file": node.data.is_file and node.data.file_path == "src/tracked.txt",
+                    "hunk": node.data.is_hunk and node.data.file_path == "src/tracked.txt",
+                }[scope]
+            )
+            if selected.parent is not None:
+                selected.parent.expand()
+            tree.focus()
+            await pilot.pause()
+            tree.move_cursor(selected)
+            await pilot.pause()
+            preview = app.query_one("#diff-view", TextArea)
+            if scope in {"group", "directory"}:
+                preview.focus()
+                index = git.commands.run("git", "write-tree")
+                await pilot.press("s", "d")
+                assert git.commands.run("git", "write-tree") == index
+                return
+            row = preview.text.splitlines().index("+new 10")
+            preview.focus()
+            preview.move_cursor((row, 0))
+            index = git.commands.run("git", "write-tree")
+            await pilot.press("d" if stage else "s")
+            assert git.commands.run("git", "write-tree") == index
+            if stage:
+                assert isinstance(app.screen, DiscardChangesDialog)
+                await pilot.press("escape")
+            await pilot.press("s" if stage else "d")
+            await pilot.pause()
+            expected = (
+                base.replace("line 11\n", "line 11\nnew 10\n")
+                if stage
+                else worktree.replace("new 10\n", "")
+            )
+            assert git.commands.run("git", "show", ":src/tracked.txt") == expected
+            assert git.commands.run("git", "show", ":other.txt") == other_index
+            assert path.read_text() == worktree
+            assert preview.has_focus
+
+    asyncio.run(run_app())
+
+
+def test_preview_line_selection_rejects_multiple_hunks_and_supports_reverse_selection(
+    line_repository: StGitRepository,
+) -> None:
+    repository = line_repository
+    git = repository.git
+
+    async def run_app() -> None:
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            selected = next(
+                node
+                for node in walk_nodes(tree.root)
+                if node.data and node.data.is_file and node.data.file_path == "src/tracked.txt"
+            )
+            tree.focus()
+            tree.move_cursor(selected)
+            await pilot.pause()
+            preview = app.query_one("#diff-view", TextArea)
+            preview.focus()
+            lines = preview.text.splitlines()
+            first = lines.index("+new 10")
+            second = lines.index("+new 70")
+            preview.selection = Selection((first, 0), (second, 0))
+            index = git.commands.run("git", "write-tree")
+            await pilot.press("s")
+            assert "single diff hunk" in str(app.query_one("#status", Static).render())
+            assert git.commands.run("git", "write-tree") == index
+            await pilot.press("d")
+            assert not isinstance(app.screen, DiscardChangesDialog)
+            assert git.commands.run("git", "write-tree") == index
+            preview.move_cursor(
+                (next(i for i, line in enumerate(lines) if line.startswith("@@")), 0)
+            )
+            await pilot.press("d")
+            assert not isinstance(app.screen, DiscardChangesDialog)
+            assert "Select added or removed" in str(app.query_one("#status", Static).render())
+            assert git.commands.run("git", "write-tree") == index
+            preview.selection = Selection((first + 1, 0), (first, 0))
+            await pilot.press("s")
+            staged = git.commands.run("git", "show", ":src/tracked.txt")
+            assert "line 10\nline 11\nnew 10\nnew 11\n" in staged
+            assert "new 70" not in staged
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("scope", ["file", "hunk"])
+def test_preview_discard_selected_lines_confirms_and_preserves_staged_changes(
+    line_repository: StGitRepository, scope: str
+) -> None:
+    repository = line_repository
+    git = repository.git
+    path = repository.root / "src/tracked.txt"
+    worktree = path.read_text().replace("line 30\n", "staged 30\n")
+    base = git.commands.run("git", "show", "HEAD:src/tracked.txt")
+    path.write_text(base.replace("line 30\n", "staged 30\n"))
+    git.stage_files(("src/tracked.txt",))
+    path.write_text(worktree)
+    index = git.commands.run("git", "write-tree")
+
+    async def run_app() -> None:
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            node = next(
+                node
+                for node in walk_nodes(tree.root)
+                if node.data
+                and node.data.is_unstaged
+                and node.data.file_path == "src/tracked.txt"
+                and (node.data.is_file if scope == "file" else node.data.is_hunk)
+            )
+            if node.parent is not None:
+                node.parent.expand()
+            tree.focus()
+            await pilot.pause()
+            tree.move_cursor(node)
+            await pilot.pause()
+            preview = app.query_one("#diff-view", TextArea)
+            row = preview.text.splitlines().index("+new 10")
+            preview.focus()
+            preview.move_cursor((row, 0))
+            for cancel in ("escape", "button"):
+                await pilot.press("d")
+                assert isinstance(app.screen, DiscardChangesDialog)
+                assert app.focused is app.screen.query_one("#cancel-delete")
+                assert path.read_text() == worktree
+                if cancel == "escape":
+                    await pilot.press("escape")
+                else:
+                    await pilot.click("#cancel-delete")
+                assert path.read_text() == worktree
+                assert git.commands.run("git", "write-tree") == index
+            await pilot.press("d")
+            summary = app.screen.query_one("#delete-stat", VerticalScroll).query_one(Static)
+            assert "1 insertion(+)" in str(summary.render())
+            assert "deletion" not in str(summary.render())
+            # The confirmation refers to the original selection, even if the cursor changes.
+            preview.move_cursor((row + 1, 0))
+            await pilot.click("#confirm-delete")
+            await pilot.pause()
+            assert path.read_text() == worktree.replace("new 10\n", "")
+            assert git.commands.run("git", "write-tree") == index
+            assert preview.has_focus
+
+    asyncio.run(run_app())
+
+
+def test_preview_discard_selected_lines_rechecks_after_confirmation(
+    line_repository: StGitRepository,
+) -> None:
+    repository = line_repository
+    git = repository.git
+    path = repository.root / "src/tracked.txt"
+
+    async def run_app() -> None:
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            node = next(
+                node
+                for node in walk_nodes(tree.root)
+                if node.data and node.data.is_file and node.data.file_path == "src/tracked.txt"
+            )
+            tree.focus()
+            tree.move_cursor(node)
+            await pilot.pause()
+            preview = app.query_one("#diff-view", TextArea)
+            preview.focus()
+            preview.move_cursor((preview.text.splitlines().index("+new 10"), 0))
+            await pilot.press("d")
+            assert isinstance(app.screen, DiscardChangesDialog)
+            newer = path.read_text().replace("new 10\n", "newer 10\n")
+            path.write_text(newer)
+            index = git.commands.run("git", "write-tree")
+            await pilot.click("#confirm-delete")
+            await pilot.pause()
+            assert path.read_text() == newer
+            assert git.commands.run("git", "write-tree") == index
+            assert "no longer present" in str(app.query_one("#status", Static).render())
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("discard", [False, True])
+def test_delete_confirmation_scrolls_long_diffstat(discard: bool) -> None:
+    async def run_app() -> None:
+        app = StgLayersApp(FixtureRepository())
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            summary = "\n".join(f" dir/{'long' * 25}{i}.txt | 1 +" for i in range(100))
+            dialog = DiscardChangesDialog if discard else DeletePatchDialog
+            app.push_screen(dialog("example", diffstat=summary))
+            await pilot.pause()
+            stat = app.screen.query_one("#delete-stat", VerticalScroll)
+            assert stat.max_scroll_y > 0
+            assert stat.max_scroll_x > 0
+            container = app.screen.query_one("#delete-dialog")
+            button = app.screen.query_one("#confirm-delete", Button)
+            assert button.region.bottom <= container.region.bottom
+            assert app.focused is app.screen.query_one("#cancel-delete")
+            assert await pilot.click("#cancel-delete")
+            assert not isinstance(app.screen, DeletePatchDialog)
+
+    asyncio.run(run_app())
+
+
+
+def test_delete_summary_error_does_not_open_confirmation_or_delete_patch() -> None:
+    class FailedStatRepository(FixtureRepository):
+        def patch_diffstat(self, patch_name: str) -> str:
+            raise RepositoryError("summary unavailable")
+
+    async def run_app() -> None:
+        repository = FailedStatRepository()
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            tree.focus()
+            tree.move_cursor(tree.root.children[2].children[0])
+            await pilot.press("delete")
+            assert not isinstance(app.screen, DeletePatchDialog)
+            assert repository.patch_operations == []
+            assert "summary unavailable" in str(app.query_one("#status", Static).render())
 
     asyncio.run(run_app())

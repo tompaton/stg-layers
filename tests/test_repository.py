@@ -1657,3 +1657,23 @@ def test_discover_loads_repository_identity_from_subdirectory(
     assert repository.root == root
     assert repository.branch == hunk_repository.git.current_branch()
     assert repository.remote_url == "git@example.com:repo.git"
+
+
+def test_patch_diffstat_handles_empty_text_and_binary_patches(
+    hunk_repository: StGitRepository,
+) -> None:
+    repository = hunk_repository
+    assert repository.patch_diffstat("current") == "No changes."
+    path = repository.root / "text.txt"
+    path.write_text(path.read_text().replace("line 10\n", "changed\n"))
+    repository.git.stage_files((path.name,))
+    repository.stg.refresh()
+    expected = repository.commands.run(
+        "git", "diff", "--stat", "--no-color", "HEAD^", "HEAD"
+    ).rstrip()
+    assert repository.patch_diffstat("current").split() == expected.split()
+    (repository.root / "binary.dat").write_bytes(b"\0binary\xff")
+    repository.git.stage_files(("binary.dat",))
+    repository.stg.refresh()
+    stat = repository.patch_diffstat("current")
+    assert "binary.dat" in stat and "Bin" in stat

@@ -103,7 +103,7 @@ These commands apply when the **tree** is focused.
 | Key | Selected item | Action |
 | --- | --- | --- |
 | **n** | Any | Open the new-patch message editor. **Create** adds an empty patch on top of the applied stack. |
-| **e** | Patch | Open its message editor. **Create** applies the edited message. |
+| **e** | Patch | Open its message editor. **Update** applies the edited message. |
 | **p** | Unapplied patch | Push/apply the patch using `stg push`. StGit may reorder patches as needed. |
 | **Shift+P** | Applied or current patch | Pop/unapply the patch using `stg pop`. |
 | **c** | Patch | Commit the patch into the stack's base using `stg commit`. StGit rearranges the stack as needed. |
@@ -120,11 +120,19 @@ These commands apply when the **diff preview** is focused.
 | --- | --- | --- |
 | **n / p** | Any | Select the next / previous hunk in displayed tree order, including hunks in collapsed files. Focus stays in the preview. |
 | **Enter** | Unstaged/Staged file or hunk | Stage/Unstage the selection; selecting a file stages/unstages all its hunks. |
+| **s** | Unstaged file or hunk | Stage only the selected added/removed lines, within a single hunk. |
+| **d** | Staged file or hunk | Unstage only the selected added/removed lines, within a single hunk. |
+| **d** | Unstaged file or hunk | Confirm, then discard only the selected added/removed lines within a single hunk. Staged changes are preserved. **Discard cannot be undone.** |
 | **w** | Any | Toggle word wrap in the diff preview. |
+| **Arrow keys** | Any | Move through the diff. |
+| **Shift+Arrow keys** | Any | Select whole lines: Up/Left moves backward; Down/Right moves forward. Reversing direction shrinks the selection back to the current line. |
 | **Page Up / Page Down** | Any | Scroll the preview. The mouse wheel also scrolls. |
 | **Tab / Shift+Tab** | Any | Move focus back to the tree. |
 
 The preview is read-only. Insertions, deletions, and hunk headers are highlighted.
+
+Delete and discard confirmations include a diffstat summary of the selected
+patch, files, hunk, or lines. Long summaries can be scrolled.
 
 ### Conflict recovery
 
