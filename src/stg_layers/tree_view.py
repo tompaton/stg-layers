@@ -8,6 +8,7 @@ from stg_layers.tree_builder import TreeBuilder
 
 class LayerTree(Tree[TreeItem]):
     BINDINGS = [
+        Binding("m", "choose_move_target", "Move to…", priority=True),
         Binding(
             "enter",
             "apply_selected_change",
@@ -41,6 +42,9 @@ class LayerTree(Tree[TreeItem]):
         Binding("left", "collapse_or_parent", show=False),
         Binding("right", "expand_or_child", show=False),
     ]
+
+    async def action_choose_move_target(self) -> None:
+        await self.app.run_action("choose_move_target(False)")
 
     async def action_move_change_down(self) -> None:
         await self.app.run_action("move_change_down")

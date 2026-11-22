@@ -4,6 +4,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TypeVar
 
+from stg_layers.change_moves import ChangeMover, ChangeSelection, MoveTarget
 from stg_layers.commands import CommandRunner
 from stg_layers.errors import RepositoryError
 from stg_layers.git import Git, extract_hunk_diff
@@ -110,15 +111,20 @@ class StGitRepository:
             )
         return new_stash
 
-    def _restore_stash(self, stash_commit: str) -> None:
+    def _restore_stash(self, stash_commit: str | None, *, apply_commit: str | None = None) -> None:
         try:
-            self.git.apply_stash(stash_commit)
+            index = self.git.moved_stash_index(apply_commit) if apply_commit else None
+            self.git.apply_stash(apply_commit or stash_commit or "")
+            if index is not None:
+                self.git.set_index_tree(index)
         except RepositoryError:
             self._pending_stack_stash = stash_commit
             self._pending_stash_restore_conflict = True
             raise
         self._pending_stack_stash = None
         self._pending_stash_restore_conflict = False
+        if stash_commit is None:
+            return
         try:
             self.git.drop_stash(stash_commit)
         except RepositoryError as error:
@@ -127,7 +133,14 @@ class StGitRepository:
                 "in the stash list."
             ) from error
 
-    def _run_stack_transaction(self, operation: Callable[[StGit], _T]) -> _T:
+    def _run_stack_transaction(
+        self,
+        operation: Callable[[StGit], _T],
+        *,
+        transform_stash: Callable[[str | None], str] | None = None,
+    ) -> _T:
+        # A move may change which edits remain local. Restore a derived snapshot
+        # on success, but retain the original stash for rollback and conflict Undo.
         self._ensure_patch_stack_is_safe()
         stash_commit = self._stash_current_changes()
         undo_count = 0
@@ -140,13 +153,14 @@ class StGitRepository:
         stg = StGit(self.commands, after_mutation=record_mutation)
         try:
             result = operation(stg)
+            restore_commit = transform_stash(stash_commit) if transform_stash else None
         except RepositoryError as error:
             self._recover_failed_stack_transaction(error, stash_commit, undo_count)
             raise
 
         self._pending_stack_undo_count = undo_count
-        if stash_commit is not None:
-            self._restore_stash_after_stack_transaction(stash_commit)
+        if stash_commit is not None or restore_commit is not None:
+            self._restore_stash_after_stack_transaction(stash_commit, apply_commit=restore_commit)
         self._pending_stack_operation = False
         self._pending_stack_stash = None
         self._pending_stash_restore_conflict = False
@@ -196,11 +210,13 @@ class StGitRepository:
                 f"{restore_error}"
             ) from operation_error
 
-    def _restore_stash_after_stack_transaction(self, stash_commit: str) -> None:
+    def _restore_stash_after_stack_transaction(
+        self, stash_commit: str | None, *, apply_commit: str | None = None
+    ) -> None:
         try:
-            self._restore_stash(stash_commit)
+            self._restore_stash(stash_commit, apply_commit=apply_commit)
         except RepositoryError as error:
-            if self._pending_stack_stash is None:
+            if not self._pending_stash_restore_conflict:
                 self._pending_stack_operation = False
                 raise
             self._pending_stack_operation = True
@@ -208,6 +224,14 @@ class StGitRepository:
             raise RepositoryError(
                 f"The stack operation completed, but restoring saved local changes failed: {error}"
             ) from error
+
+    def move_to_target(
+        self, selection: ChangeSelection, target: MoveTarget, *, message: str | None = None
+    ) -> None:
+        ChangeMover(self).move(selection, target, message)
+
+    def squash_message_template(self, source: str, target: str) -> str:
+        return self.stg.squash_message_template(source, target)
 
     def move_patch_one_step(
         self,

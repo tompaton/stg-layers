@@ -249,6 +249,83 @@ class Git:
             groups.append(paths)
         return tuple(groups)
 
+    def local_file_diff(self, file: FileChange, *, staged: bool) -> str:
+        args = [
+            "git",
+            "--literal-pathspecs",
+            "diff",
+            "--binary",
+            "--full-index",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+        ]
+        if staged:
+            paths = (
+                (file.source_path, file.path) if file.status == FileStatus.RENAMED else (file.path,)
+            )
+            return self.commands.run(*args, "--cached", "--", *paths)
+        if self.is_tracked(file.path):
+            return self.commands.run(*args, "--", file.path)
+        return self.commands.run(
+            *args, "--no-index", "--", "/dev/null", file.path, allowed_returncodes=(1,)
+        )
+
+    def is_ancestor(self, older: str, newer: str) -> bool:
+        return (
+            self.commands.run("git", "merge-base", older, newer, allowed_returncodes=(1,)).strip()
+            == older
+        )
+
+    def head_commit(self) -> str:
+        return self.commands.run("git", "rev-parse", "HEAD").strip()
+
+    def stash_trees(self, stash: str | None, head: str) -> tuple[str, str, str, str | None]:
+        if stash is None:
+            return head, head, head, None
+        untracked = self.commands.run(
+            "git", "rev-parse", "--verify", "--quiet", f"{stash}^3", allowed_returncodes=(1,)
+        ).strip()
+        return f"{stash}^1", f"{stash}^2", stash, untracked or None
+
+    def tree_has_path(self, tree: str, path: str) -> bool:
+        return bool(
+            self.commands.run("git", "--literal-pathspecs", "ls-tree", "-z", tree, "--", path)
+        )
+
+    def copy_tree_paths(self, tree: str, source: str, paths: tuple[str, ...]) -> str:
+        entries = self.commands.run(
+            "git", "--literal-pathspecs", "ls-tree", "-rz", source, "--", *paths
+        )
+        with self.temporary_index():
+            self.set_index_tree(tree)
+            self.commands.run("git", "update-index", "-z", "--index-info", input_text=entries)
+            return self.index_tree()
+
+    def remove_tree_paths(self, tree: str, paths: tuple[str, ...]) -> str:
+        with self.temporary_index():
+            self.set_index_tree(tree)
+            self.commands.run(
+                "git", "--literal-pathspecs", "update-index", "--force-remove", "--", *paths
+            )
+            return self.index_tree()
+
+    def create_stash(self, base: str, index: str, worktree: str, untracked: str | None) -> str:
+        def commit(tree: str, parents: tuple[str, ...] = ()) -> str:
+            tree = self.commands.run("git", "rev-parse", f"{tree}^{{tree}}").strip()
+            args = tuple(arg for parent in parents for arg in ("-p", parent))
+            return self.commands.run(
+                "git", "commit-tree", tree, *args, input_text="stg-layers move\n"
+            ).strip()
+
+        base_commit = commit(base)
+        index_commit = commit(index, (base_commit,))
+        parents = (base_commit, index_commit)
+        if untracked:
+            parents += (commit(untracked),)
+        return commit(worktree, parents)
+
     def staged_file_diff(self, path: str) -> str:
         return self.commands.run(
             "git",
@@ -492,6 +569,23 @@ class Git:
             "refs/stash",
             allowed_returncodes=(1,),
         ).strip()
+
+    def moved_stash_index(self, commit: str) -> str:
+        """Rebase the saved index onto HEAD, including an explicitly absent new file."""
+        diff = self.commands.run(
+            "git",
+            "diff",
+            "--binary",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            f"{commit}^1",
+            f"{commit}^2",
+        )
+        with self.temporary_index():
+            if diff:
+                self.apply_index_diff(diff)
+            return self.index_tree()
 
     def apply_stash(self, commit: str) -> None:
         self.commands.run("git", "stash", "apply", "--index", commit)

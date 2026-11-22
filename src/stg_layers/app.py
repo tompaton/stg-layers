@@ -12,10 +12,12 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Static, TextArea, Tree
 from textual.widgets._tree import TreeNode
 
+from stg_layers.change_moves import ChangeSelection, MoveTarget
 from stg_layers.dialogs import (
     ConflictDialog,
     DeletePatchDialog,
     DiscardChangesDialog,
+    MoveTargetDialog,
     PatchMessageDialog,
 )
 from stg_layers.diff_preview import DiffPreview
@@ -106,6 +108,12 @@ class StackReader(Protocol):
     def edit_patch_template(self, patch_name: str) -> str: ...
 
     def edit_patch(self, patch_name: str, message: str) -> None: ...
+
+    def move_to_target(
+        self, selection: ChangeSelection, target: MoveTarget, *, message: str | None = None
+    ) -> None: ...
+
+    def squash_message_template(self, source: str, target: str) -> str: ...
 
     def move_patch_one_step(
         self,
@@ -886,6 +894,95 @@ class StgLayersApp(App[None]):
         else:
             await asyncio.to_thread(self.repository.spill_current_patch_files, paths)
         return item.as_selection(change_area="staged")
+
+    async def action_choose_move_target(self, preview: bool = False) -> None:
+        node = self.query_one("#patch-tree", LayerTree).cursor_node
+        item = self._shown_item if preview else node.data if node else None
+        if item is None or node is None:
+            return
+        if not (item.change_area or item.patch_name):
+            return
+        async with self._handle_repository_conflict_error(), self._handle_move_status():
+            lines = (
+                self.query_one("#diff-view", DiffPreview).selected_lines(item) if preview else None
+            )
+            paths = (lines.path,) if lines else self._target_move_paths(item, node)
+            selection = ChangeSelection(
+                MoveTarget(change_area=item.change_area, patch_name=item.patch_name),
+                paths,
+                hunk_diff=item.diff_text if item.is_hunk and not preview else None,
+                lines=lines,
+                whole_patch=item.is_patch and not preview,
+            )
+            if not await self._ensure_repository_ready():
+                return
+            patches = self._require_loaded_patches()
+            if self.newest_first:
+                patches = tuple(reversed(patches))
+            targets = (
+                MoveTarget(change_area="unstaged"),
+                MoveTarget(change_area="staged"),
+            ) + tuple(MoveTarget(patch_name=patch.name) for patch in patches)
+            self.push_screen(
+                MoveTargetDialog(
+                    f"selected lines of {lines.path}" if lines else item.title,
+                    tuple(target for target in targets if target != selection.source),
+                    patches=patches,
+                ),
+                lambda target: self._on_move_target(selection, target),
+            )
+
+    def _target_move_paths(self, item: TreeItem, node: TreeNode[TreeItem]) -> tuple[str, ...]:
+        if item.is_patch:
+            patch = self._get_patch(item.patch_name)
+            return tuple(file.path for file in patch.files) if patch else ()
+        return self._move_paths(item, node)
+
+    def _on_move_target(self, selection: ChangeSelection, target: MoveTarget | None) -> None:
+        if target is not None:
+            self.run_worker(self._prepare_target_move(selection, target), exclusive=True)
+
+    async def _prepare_target_move(self, selection: ChangeSelection, target: MoveTarget) -> None:
+        if not selection.whole_patch or target.patch_name is None:
+            await self._move_to_target(selection, target)
+            return
+        if not await self._ensure_repository_ready():
+            return
+        async with self._handle_repository_conflict_error():
+            template = await asyncio.to_thread(
+                self.repository.squash_message_template,
+                selection.source.patch_name or "",
+                target.patch_name,
+            )
+            self.push_screen(
+                PatchMessageDialog(template, submit_label="Update"),
+                lambda message: self._on_squash_message(selection, target, message),
+            )
+
+    def _on_squash_message(
+        self, selection: ChangeSelection, target: MoveTarget, message: str | None
+    ) -> None:
+        if message is not None:
+            self.run_worker(
+                self._move_to_target(selection, target, message=message), exclusive=True
+            )
+
+    async def _move_to_target(
+        self, selection: ChangeSelection, target: MoveTarget, *, message: str | None = None
+    ) -> None:
+        if not await self._ensure_repository_ready():
+            return
+        async with self._handle_repository_conflict_error():
+            self._show_status(f"Moving changes to {target.label}...")
+            await asyncio.to_thread(
+                self.repository.move_to_target, selection, target, message=message
+            )
+            preferred = (
+                TreeItem.for_patch_selection(target.patch_name)
+                if target.patch_name is not None
+                else TreeItem.for_change_group(target.change_area or "unstaged")[0].as_selection()
+            )
+            await self._load_stack(preferred_selection=preferred)
 
     async def action_discard_preview_lines(self) -> None:
         item = self._shown_item

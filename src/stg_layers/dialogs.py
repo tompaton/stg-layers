@@ -4,7 +4,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Static, TextArea
+from textual.widgets import Button, OptionList, Static, TextArea
+
+from stg_layers.change_moves import MoveTarget
+from stg_layers.models import Patch, PatchStatus, TreeItem
 
 
 class PatchMessageDialog(ModalScreen[str | None]):
@@ -213,3 +216,74 @@ class ConflictDialog(ModalScreen[str | None]):
 
     def action_quit(self) -> None:
         self.dismiss("quit")
+
+
+class MoveTargetDialog(ModalScreen[MoveTarget | None]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+    DEFAULT_CSS = """
+    MoveTargetDialog { align: center middle; }
+    #move-dialog {
+        width: 80;
+        max-width: 95%;
+        height: auto;
+        max-height: 85%;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #move-targets { height: auto; max-height: 60vh; margin: 1 0; }
+    #move-actions { height: auto; align-horizontal: right; }
+    """
+
+    def __init__(
+        self, description: str, targets: tuple[MoveTarget, ...], *, patches: tuple[Patch, ...] = ()
+    ) -> None:
+        super().__init__()
+        self.description = description
+        self.targets = targets
+        self.patch_labels = {patch.name: TreeItem.for_patch(patch)[1] for patch in patches}
+        self.default_target = next(
+            (
+                MoveTarget(patch_name=patch.name)
+                for patch in patches
+                if patch.status == PatchStatus.CURRENT
+            ),
+            None,
+        )
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="move-dialog"):
+            yield Static(Text(f"Move {self.description} to:"))
+            yield OptionList(
+                *(
+                    self.patch_labels.get(target.patch_name or "", Text(target.label))
+                    for target in self.targets
+                ),
+                id="move-targets",
+            )
+            with Horizontal(id="move-actions"):
+                yield Button("Cancel", id="cancel-move")
+                yield Button(
+                    "Move", id="confirm-move", variant="primary", disabled=not self.targets
+                )
+
+    def on_mount(self) -> None:
+        options = self.query_one("#move-targets", OptionList)
+        options.highlighted = 0 if self.targets else None
+        if self.default_target in self.targets:
+            options.highlighted = self.targets.index(self.default_target)
+        options.focus()
+
+    @on(OptionList.OptionSelected, "#move-targets")
+    def select_target(self) -> None:
+        self.query_one("#confirm-move", Button).focus()
+
+    @on(Button.Pressed, "#cancel-move")
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#confirm-move")
+    def confirm(self) -> None:
+        index = self.query_one("#move-targets", OptionList).highlighted
+        if index is not None:
+            self.dismiss(self.targets[index])

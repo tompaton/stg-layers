@@ -65,6 +65,7 @@ These commands apply when the **tree** is focused.
 | Key | Selected item | Action |
 | --- | --- | --- |
 | **Enter** | Unstaged/Staged group, directory, file, or hunk | Stage/Unstage the selection. |
+| **m** | Group, directory, file, or hunk | Move the selection from Unstaged, Staged, or a patch to Unstaged, Staged, or any other patch. Groups and directories move all contained files. Select **Move** to confirm or **Cancel** to leave changes in place. |
 | **Delete** | Unstaged group, directory, file, or hunk | Confirm, then discard the selection. Tracked files are restored from the index; untracked files are removed. Staged changes are preserved. **Discard cannot be undone.** |
 
 After Enter on a file or hunk, selection advances within the source group.
@@ -88,8 +89,9 @@ unchanged.
 
 Selection follows the moved item. Directory
 and group operations include all contained files, including collapsed descendants.
-Transfers and reordering stop at stack edges and do not cross the applied/unapplied
-boundary.
+These directional transfers and reordering stop at stack edges and do not cross
+the applied/unapplied boundary. The **m** target picker also supports nonadjacent,
+unapplied, and hidden patches, preserving patch order and visibility.
 
 Whole-file and directory spills require the selected paths to have no staged
 changes; unstage those changes first. Hunk moves between the current patch and
@@ -110,6 +112,7 @@ These commands apply when the **tree** is focused.
 | **Shift+C** | Any, including an empty stack | Convert the newest commit beneath the stack into one applied patch using `stg uncommit --number 1`. |
 | **h** | Patch | Hide the patch, unapplying it first if necessary. |
 | **Shift+H** | Patch | Unhide the patch, leaving it unapplied. |
+| **m** | Patch | Choose Staged or Unstaged to spill all patch changes, leaving the patch empty. Choose another patch to squash into it, keeping the target name; edit the combined message and select **Update**. Cancelling the message leaves both patches unchanged. |
 | **Delete** | Patch | Open an **OK/Cancel** confirmation before deleting it. |
 
 ### Diff preview
@@ -122,6 +125,7 @@ patches, regardless of tree order.
 | --- | --- | --- |
 | **n / p** | Any | Select the next / previous hunk in displayed tree order, including hunks in collapsed files. Focus stays in the preview. |
 | **Enter** | Unstaged/Staged file or hunk | Stage/Unstage the selection; selecting a file stages/unstages all its hunks. |
+| **m** | Changes or patch | Choose a target for only the selected added/removed lines within one hunk. The source is excluded from the target list. |
 | **s** | Unstaged file or hunk | Stage only the selected added/removed lines, within a single hunk. |
 | **s** | Staged file or hunk | Move only the selected added/removed lines into the current patch, within a single hunk. Other staged and unstaged changes are preserved. |
 | **s** | Applied patch, file, or hunk | Move selected lines within one hunk to the adjacent older applied patch. |

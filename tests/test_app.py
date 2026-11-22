@@ -6,15 +6,30 @@ from pathlib import Path
 import pytest
 from rich.text import Text
 from textual.containers import VerticalScroll
-from textual.widgets import Button, Static, TextArea, Tree
+from textual.widgets import Button, OptionList, Static, TextArea, Tree
 from textual.widgets.text_area import Selection
 
 from stg_layers.app import StgLayersApp
+from stg_layers.change_moves import ChangeSelection, MoveTarget
 from stg_layers.commands import CommandRunner
-from stg_layers.dialogs import ConflictDialog, DeletePatchDialog, DiscardChangesDialog
+from stg_layers.dialogs import (
+    ConflictDialog,
+    DeletePatchDialog,
+    DiscardChangesDialog,
+    MoveTargetDialog,
+    PatchMessageDialog,
+)
 from stg_layers.errors import RepositoryError
 from stg_layers.git import Git
-from stg_layers.models import DiffHunk, FileChange, FileStatus, Patch, PatchStatus, hunk_key
+from stg_layers.models import (
+    ChangeArea,
+    DiffHunk,
+    FileChange,
+    FileStatus,
+    Patch,
+    PatchStatus,
+    hunk_key,
+)
 from stg_layers.partial_diff import HunkLineSelection
 from stg_layers.repository import PatchChangeMoveResult, PatchMoveResult, StGitRepository
 from stg_layers.tree_builder import TreeBuilder
@@ -179,6 +194,14 @@ class FixtureRepository:
 
     def edit_patch(self, patch_name: str, message: str) -> None:
         self.edited_patches.append((patch_name, message))
+
+    def move_to_target(
+        self, selection: ChangeSelection, target: MoveTarget, *, message: str | None = None
+    ) -> None:
+        self.actions.append(("move_to_target", target.label, None))
+
+    def squash_message_template(self, source: str, target: str) -> str:
+        return f"{target} message\n\n{source} message\n"
 
     def move_patch_one_step(self, patch_name: str, *, toward_newer: bool) -> PatchMoveResult:
         self.patch_moves.append((patch_name, toward_newer))
@@ -3503,5 +3526,264 @@ def test_preview_delete_discards_lines_from_staged_or_patch(
             if source == "patch":
                 assert repository.commands.run("git", "show", "HEAD:src/tracked.txt") == expected
             assert preview.has_focus
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("scope", ["group", "directory", "file", "hunk", "lines"])
+@pytest.mark.parametrize("source", ["unstaged", "staged"])
+def test_move_target_picker_moves_captured_selection(
+    line_repository: StGitRepository, scope: str, source: ChangeArea
+) -> None:
+    repository = line_repository
+    repository.commands.run("stg", "new", "-m", "Target", "target")
+    if source == "staged":
+        repository.git.stage_files(("src/tracked.txt", "other.txt"))
+    before = (repository.root / "src/tracked.txt").read_bytes()
+
+    async def run_app() -> None:
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            node = next(
+                node
+                for node in walk_nodes(tree.root)
+                if node.data
+                and node.data.change_area == source
+                and (
+                    node.data.is_change_group
+                    if scope == "group"
+                    else node.data.is_directory
+                    if scope == "directory"
+                    else node.data.is_hunk
+                    if scope == "hunk"
+                    else node.data.is_file
+                )
+                and (scope in ("group", "directory") or node.data.file_path == "src/tracked.txt")
+            )
+            parent = node.parent
+            while parent is not None:
+                parent.expand()
+                parent = parent.parent
+            await pilot.pause()
+            tree.focus()
+            tree.move_cursor(node)
+            await pilot.pause()
+            if scope == "lines":
+                preview = app.query_one("#diff-view", TextArea)
+                preview.focus()
+                preview.move_cursor((preview.text.splitlines().index("+new 10"), 0))
+            await pilot.press("m")
+            assert isinstance(app.screen, MoveTargetDialog)
+            assert MoveTarget(change_area=source) not in app.screen.targets
+            assert MoveTarget(patch_name="target") in app.screen.targets
+            await pilot.press("escape")
+            assert repository.load_stack()[0].files == ()
+            await pilot.press("m")
+            dialog = app.screen
+            assert isinstance(dialog, MoveTargetDialog)
+            options = dialog.query_one("#move-targets", OptionList)
+            options.highlighted = dialog.targets.index(MoveTarget(patch_name="target"))
+            await pilot.click("#confirm-move")
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            patch = repository.load_stack()[0]
+            assert "+new 10" in patch.diff_text
+            assert ("+new 70" in patch.diff_text) == (scope in ("group", "directory", "file"))
+            assert ("+other changed" in patch.diff_text) == (scope == "group")
+            assert (repository.root / "src/tracked.txt").read_bytes() == before
+            assert ("-line 10" in patch.diff_text) == (scope != "lines")
+
+    asyncio.run(run_app())
+
+
+def test_move_whole_patch_opens_combined_message_before_squashing(
+    line_repository: StGitRepository,
+) -> None:
+    repository = line_repository
+    repository.commands.run("stg", "new", "-m", "First message", "first")
+    repository.git.stage_files(("src/tracked.txt",))
+    repository.commands.run("stg", "refresh", "--index")
+    repository.commands.run("stg", "new", "-m", "Second message", "second")
+    repository.git.stage_files(("other.txt",))
+    repository.commands.run("stg", "refresh", "--index")
+
+    async def run_app() -> None:
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            node = next(
+                node
+                for node in walk_nodes(tree.root)
+                if node.data and node.data.is_patch and node.data.patch_name == "first"
+            )
+            tree.focus()
+            tree.move_cursor(node)
+            await pilot.pause()
+            for cancel in (True, False):
+                await pilot.press("m")
+                dialog = app.screen
+                assert isinstance(dialog, MoveTargetDialog)
+                dialog.query_one("#move-targets", OptionList).highlighted = dialog.targets.index(
+                    MoveTarget(patch_name="second")
+                )
+                await pilot.click("#confirm-move")
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                assert isinstance(app.screen, PatchMessageDialog)
+                message = app.screen.query_one("#patch-message", TextArea)
+                assert "First message" in message.text
+                assert "Second message" in message.text
+                assert len(repository.load_stack()) == 2
+                if cancel:
+                    await pilot.press("escape")
+                    assert len(repository.load_stack()) == 2
+                else:
+                    message.load_text("Combined message\n\nBoth patches.\n")
+                    await pilot.click("#create-patch")
+                    await pilot.pause()
+                    await app.workers.wait_for_complete()
+                    await pilot.pause()
+            (patch,) = repository.load_stack()
+            assert patch.name == "second"
+            assert patch.description == "Combined message"
+            assert {file.path for file in patch.files} == {"src/tracked.txt", "other.txt"}
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("scope", ["patch", "file", "hunk"])
+@pytest.mark.parametrize("target_patch", [True, False])
+def test_preview_move_target_always_moves_selected_lines(
+    line_repository: StGitRepository, scope: str, target_patch: bool
+) -> None:
+    repository = line_repository
+    commands = repository.commands
+    commands.run("stg", "new", "-m", "Source message", "source")
+    repository.git.stage_files(("src/tracked.txt",))
+    commands.run("stg", "refresh", "--index")
+    commands.run("stg", "new", "-m", "Middle", "middle")
+    commands.run("stg", "new", "-m", "Target message", "target")
+    before = (repository.root / "src/tracked.txt").read_bytes()
+    target = MoveTarget(patch_name="target") if target_patch else MoveTarget(change_area="staged")
+
+    async def run_app() -> None:
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            node = next(
+                node
+                for node in walk_nodes(tree.root)
+                if node.data
+                and node.data.patch_name == "source"
+                and (
+                    node.data.is_patch
+                    if scope == "patch"
+                    else node.data.is_file
+                    if scope == "file"
+                    else node.data.is_hunk
+                )
+            )
+            parent = node.parent
+            while parent is not None:
+                parent.expand()
+                parent = parent.parent
+            await pilot.pause()
+            tree.move_cursor(node)
+            await pilot.pause()
+            preview = app.query_one("#diff-view", TextArea)
+            preview.focus()
+            preview.move_cursor((preview.text.splitlines().index("+new 10"), 0))
+            await pilot.press("m")
+            dialog = app.screen
+            assert isinstance(dialog, MoveTargetDialog)
+            dialog.query_one("#move-targets", OptionList).highlighted = dialog.targets.index(target)
+            # Enter on a target focuses Move, allowing a keyboard-only confirmation.
+            await pilot.press("enter")
+            assert app.focused is dialog.query_one("#confirm-move")
+            await pilot.press("enter")
+            await pilot.pause()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            patches = {patch.name: patch for patch in repository.load_stack()}
+            assert set(patches) == {"source", "middle", "target"}
+            assert patches["source"].description == "Source message"
+            assert "+new 10" not in patches["source"].diff_text
+            assert "+new 11" in patches["source"].diff_text
+            moved_diff = (
+                patches["target"].diff_text
+                if target_patch
+                else "".join(file.diff_text for file in repository.load_staged_changes())
+            )
+            assert "+new 10" in moved_diff
+            assert "+new 11" not in moved_diff
+            assert "-line 10" not in moved_diff
+            assert (repository.root / "src/tracked.txt").read_bytes() == before
+
+    asyncio.run(run_app())
+
+
+@pytest.mark.parametrize("reverse_order", [False, True])
+@pytest.mark.parametrize("source_name", ["second", "third"])
+def test_move_target_patch_order_matches_tree(
+    line_repository: StGitRepository, reverse_order: bool, source_name: str
+) -> None:
+    repository = line_repository
+    repository.git.stash()
+    for name in ("first", "second", "third", "fourth", "fifth"):
+        repository.commands.run("stg", "new", "-m", name, name)
+    repository.commands.run("stg", "pop", "fifth")
+    repository.commands.run("stg", "hide", "fifth")
+    repository.commands.run("stg", "pop", "fourth")
+
+    async def run_app() -> None:
+        app = StgLayersApp(repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            if reverse_order:
+                await pilot.press("R")
+                await pilot.pause()
+            tree = app.query_one("#patch-tree", Tree)
+            patch_nodes = [
+                node for node in walk_nodes(tree.root) if node.data and node.data.is_patch
+            ]
+            source = next(
+                node for node in patch_nodes if node.data and node.data.patch_name == source_name
+            )
+            tree.focus()
+            tree.move_cursor(source)
+            await pilot.pause()
+            await pilot.press("m")
+            dialog = app.screen
+            assert isinstance(dialog, MoveTargetDialog)
+            assert [target.patch_name for target in dialog.targets if target.patch_name] == [
+                node.data.patch_name for node in patch_nodes if node.data and node is not source
+            ]
+            options = dialog.query_one("#move-targets", OptionList)
+            expected_default = (
+                dialog.targets.index(MoveTarget(patch_name="third"))
+                if source_name != "third"
+                else 0
+            )
+            assert options.highlighted == expected_default
+            for index, target in enumerate(dialog.targets):
+                if target.patch_name is None:
+                    continue
+                node = next(
+                    node
+                    for node in patch_nodes
+                    if node.data and node.data.patch_name == target.patch_name
+                )
+                label = options.get_option_at_index(index).prompt
+                assert isinstance(label, Text)
+                assert label.plain == node.label.plain
+                assert label.spans == node.label.spans
+            assert app.newest_first is not reverse_order
+            await pilot.press("escape")
 
     asyncio.run(run_app())

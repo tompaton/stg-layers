@@ -27,6 +27,7 @@ _DIFF_THEME = TextAreaTheme(
 
 class DiffPreview(TextArea):
     BINDINGS = [
+        Binding("m", "choose_move_target", "Move to…", priority=True),
         Binding("n", "next_hunk", "Next hunk", priority=True),
         Binding("p", "previous_hunk", "Previous hunk", priority=True),
         Binding("enter", "apply_change", "Stage/unstage", priority=True),
@@ -88,6 +89,9 @@ class DiffPreview(TextArea):
 
     def action_previous_hunk(self) -> None:
         self._navigate_hunk(forward=False)
+
+    async def action_choose_move_target(self) -> None:
+        await self.app.run_action("choose_move_target(True)")
 
     async def action_apply_change(self) -> None:
         await self.app.run_action("apply_preview_change")

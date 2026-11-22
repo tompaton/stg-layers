@@ -8,7 +8,7 @@ from unidiff.errors import UnidiffParseError
 
 from stg_layers.commands import CommandRunner
 from stg_layers.errors import DiffError, RepositoryError
-from stg_layers.git import decode_git_path, parse_diff
+from stg_layers.git import Git, decode_git_path, parse_diff
 from stg_layers.models import Patch, PatchStatus
 
 _STATUS: Final[dict[str, PatchStatus]] = {
@@ -170,6 +170,41 @@ class StGit:
             except OSError as error:
                 raise RepositoryError(f"Could not write the patch message: {error}") from error
             self._mutate("edit", "--file", str(message_path), patch_ref)
+
+    def squash_message_template(self, source: str, target: str) -> str:
+        return self.commands.run(
+            "stg",
+            "squash",
+            f"--name={target}",
+            "--save-template",
+            "-",
+            *self._squash_names(source, target),
+        )
+
+    def _squash_names(self, source: str, target: str) -> tuple[str, ...]:
+        names = [name for name, _, _ in self.series() if name in (source, target)]
+        # Hidden patches can be listed in reverse ancestry order. Squashing a
+        # descendant before its ancestor can lose the ancestor's changes.
+        if len(names) == 2 and Git(self.commands).is_ancestor(
+            self.patch_commit(names[1]), self.patch_commit(names[0])
+        ):
+            names.reverse()
+        return tuple(self._patch_ref(name) for name in names)
+
+    def squash(self, source: str, target: str, message: str) -> str:
+        with tempfile.TemporaryDirectory(prefix="stg-layers-") as directory:
+            message_path = Path(directory) / "patch-message"
+            try:
+                message_path.write_text(message, encoding="utf-8")
+            except OSError as error:
+                raise RepositoryError(f"Could not write the patch message: {error}") from error
+            return self._mutate(
+                "squash",
+                f"--name={target}",
+                "--file",
+                str(message_path),
+                *self._squash_names(source, target),
+            )
 
     def patch_commit(self, name: str) -> str:
         return self.commands.run("stg", "id", self._patch_ref(name)).strip()

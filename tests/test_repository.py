@@ -5,10 +5,11 @@ from pathlib import Path
 
 import pytest
 
+from stg_layers.change_moves import ChangeSelection, MoveTarget
 from stg_layers.commands import CommandRunner
 from stg_layers.errors import CommandError, RepositoryError
 from stg_layers.git import Git
-from stg_layers.models import FileStatus, PatchStatus
+from stg_layers.models import ChangeArea, FileStatus, PatchStatus
 from stg_layers.partial_diff import HunkLineSelection
 from stg_layers.repository import (
     PatchChangeMoveResult,
@@ -2519,3 +2520,533 @@ def test_discard_patch_lines_conflict_can_be_undone(hunk_repository: StGitReposi
     assert commands.run("git", "rev-parse", "HEAD") == head
     assert repository.git.index_tree() == index
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("source", ["staged", "unstaged"])
+@pytest.mark.parametrize("target_status", ["current", "applied", "unapplied", "hidden"])
+@pytest.mark.parametrize("scope", ["files", "hunk", "lines"])
+def test_move_local_changes_to_arbitrary_patch(
+    hunk_repository: StGitRepository, source: ChangeArea, target_status: str, scope: str
+) -> None:
+    repository = hunk_repository
+    commands = repository.commands
+    path = repository.root / "text.txt"
+    base = path.read_text()
+    if target_status == "applied":
+        commands.run("stg", "new", "-m", "Later", "later")
+        (repository.root / "other.txt").write_text("later\n")
+        commands.run("stg", "refresh")
+    elif target_status in ("unapplied", "hidden"):
+        commands.run("stg", "pop")
+        if target_status == "hidden":
+            commands.run("stg", "hide", "current")
+    series = repository.stg.series()
+    changed = base.replace("line 10\n", "changed\n").replace("line 70\n", "remaining\n")
+    path.write_text(changed)
+    if source == "staged":
+        repository.git.stage_files((path.name,))
+    files = (
+        repository.load_staged_changes()
+        if source == "staged"
+        else repository.load_unstaged_changes()
+    )
+    file = next(file for file in files if file.path == path.name)
+    hunk = file.hunks[0]
+    rows = hunk.diff_text.splitlines()
+    selection = ChangeSelection(
+        MoveTarget(change_area=source),
+        (path.name,),
+        hunk_diff=hunk.diff_text if scope == "hunk" else None,
+        lines=HunkLineSelection(
+            file.path, hunk.diff_text, rows.index("-line 10"), rows.index("+changed")
+        )
+        if scope == "lines"
+        else None,
+    )
+    local_line = "line 90\n" if source == "unstaged" and scope == "files" else "unstaged\n"
+    path.write_text(changed.replace("line 90\n", local_line))
+    (repository.root / "untracked").write_text("keep\n")
+    repository.move_to_target(selection, MoveTarget(patch_name="current"))
+    commit = repository.stg.patch_commit("current")
+    patch_text = commands.run("git", "show", f"{commit}:text.txt")
+    assert "changed\n" in patch_text
+    assert ("remaining\n" in patch_text) == (scope == "files")
+    assert "unstaged\n" not in patch_text
+    assert repository.stg.series() == series
+    assert (repository.root / "untracked").read_text() == "keep\n"
+    if target_status in ("current", "applied"):
+        assert path.read_text() == changed.replace("line 90\n", local_line)
+    else:
+        expected = base if scope == "files" else base.replace("line 70\n", "remaining\n")
+        assert path.read_text() == expected.replace("line 90\n", local_line)
+    staged = commands.run("git", "diff", "--cached", "--no-ext-diff")
+    assert ("+remaining" in staged) == (source == "staged" and scope != "files")
+    assert "+changed" not in staged
+    assert not repository.has_conflicts()
+
+
+@pytest.mark.parametrize("target", ["staged", "unstaged"])
+@pytest.mark.parametrize("status", ["current", "applied", "unapplied", "hidden"])
+@pytest.mark.parametrize("scope", ["files", "hunk", "lines", "patch"])
+def test_move_patch_changes_to_working_area(
+    hunk_repository: StGitRepository, target: ChangeArea, status: str, scope: str
+) -> None:
+    repository = hunk_repository
+    commands = repository.commands
+    path = repository.root / "text.txt"
+    base = path.read_text()
+    changed = base.replace("line 10\n", "changed\n").replace("line 70\n", "remaining\n")
+    path.write_text(changed)
+    commands.run("stg", "refresh")
+    if status == "applied":
+        commands.run("stg", "new", "-m", "Later", "later")
+        (repository.root / "other.txt").write_text("later\n")
+        commands.run("stg", "refresh")
+    elif status in ("unapplied", "hidden"):
+        commands.run("stg", "pop")
+        if status == "hidden":
+            commands.run("stg", "hide", "current")
+    series = repository.stg.series()
+    patch = next(patch for patch in repository.load_stack() if patch.name == "current")
+    file = patch.files[0]
+    hunk = file.hunks[0]
+    rows = hunk.diff_text.splitlines()
+    selection = ChangeSelection(
+        MoveTarget(patch_name="current"),
+        (path.name,),
+        hunk_diff=hunk.diff_text if scope == "hunk" else None,
+        lines=HunkLineSelection(
+            file.path, hunk.diff_text, rows.index("-line 10"), rows.index("+changed")
+        )
+        if scope == "lines"
+        else None,
+        whole_patch=scope == "patch",
+    )
+    local = path.read_text().replace("line 40\n", "staged\n")
+    path.write_text(local)
+    repository.git.stage_files((path.name,))
+    path.write_text(local.replace("line 90\n", "unstaged\n"))
+    repository.move_to_target(selection, MoveTarget(change_area=target))
+    commit = repository.stg.patch_commit("current")
+    expected_patch = (
+        base if scope in ("files", "patch") else base.replace("line 70\n", "remaining\n")
+    )
+    assert commands.run("git", "show", f"{commit}:text.txt") == expected_patch
+    assert repository.stg.series() == series
+    expected = (
+        changed
+        if status in ("current", "applied") or scope in ("files", "patch")
+        else base.replace("line 10\n", "changed\n")
+    )
+    assert path.read_text() == expected.replace("line 40\n", "staged\n").replace(
+        "line 90\n", "unstaged\n"
+    )
+    staged = commands.run("git", "diff", "--cached", "--no-ext-diff")
+    unstaged = commands.run("git", "diff", "--no-ext-diff")
+    assert ("+changed" in staged) == (target == "staged")
+    assert ("+changed" in unstaged) == (target == "unstaged")
+    assert "+staged" in staged
+    assert "+unstaged" in unstaged
+
+
+@pytest.mark.parametrize("toward_newer", [True, False])
+@pytest.mark.parametrize("scope", ["files", "hunk", "lines"])
+def test_move_changes_between_nonadjacent_patches(
+    hunk_repository: StGitRepository, toward_newer: bool, scope: str
+) -> None:
+    repository = hunk_repository
+    commands = repository.commands
+    path = repository.root / "text.txt"
+    base = path.read_text()
+    if not toward_newer:
+        commands.run("stg", "new", "-m", "Middle", "middle")
+        commands.run("stg", "new", "-m", "Source", "source")
+    source = "current" if toward_newer else "source"
+    path.write_text(base.replace("line 10\n", "changed\n").replace("line 70\n", "keep\n"))
+    commands.run("stg", "refresh")
+    if toward_newer:
+        commands.run("stg", "new", "-m", "Middle", "middle")
+        commands.run("stg", "new", "-m", "Target", "target")
+    target = "target" if toward_newer else "current"
+    patch = next(patch for patch in repository.load_stack() if patch.name == source)
+    file = patch.files[0]
+    hunk = file.hunks[0]
+    rows = hunk.diff_text.splitlines()
+    selection = ChangeSelection(
+        MoveTarget(patch_name=source),
+        (path.name,),
+        hunk_diff=hunk.diff_text if scope == "hunk" else None,
+        lines=HunkLineSelection(
+            file.path, hunk.diff_text, rows.index("-line 10"), rows.index("+changed")
+        )
+        if scope == "lines"
+        else None,
+    )
+    before = path.read_bytes()
+    repository.move_to_target(selection, MoveTarget(patch_name=target))
+    patches = {patch.name: patch for patch in repository.load_stack()}
+    assert "+changed" in patches[target].diff_text
+    assert "+changed" not in patches[source].diff_text
+    assert not patches["middle"].files
+    assert path.read_bytes() == before
+    assert not repository.has_local_changes()
+
+
+@pytest.mark.parametrize("source_area", ["staged", "unstaged"])
+@pytest.mark.parametrize("applied", [True, False])
+@pytest.mark.parametrize("scope", ["file", "lines"])
+def test_move_added_file_to_patch(
+    hunk_repository: StGitRepository, source_area: ChangeArea, applied: bool, scope: str
+) -> None:
+    repository = hunk_repository
+    if not applied:
+        repository.commands.run("stg", "pop")
+    path = repository.root / "new.txt"
+    path.write_text("one\ntwo\nthree\n")
+    if source_area == "staged":
+        repository.git.stage_files((path.name,))
+    files = (
+        repository.load_staged_changes()
+        if source_area == "staged"
+        else repository.load_unstaged_changes()
+    )
+    file = next(file for file in files if file.path == path.name)
+    hunk = file.hunks[0]
+    row = hunk.diff_text.splitlines().index("+two")
+    selection = ChangeSelection(
+        MoveTarget(change_area=source_area),
+        (path.name,),
+        lines=HunkLineSelection(file.path, hunk.diff_text, row, row) if scope == "lines" else None,
+    )
+    repository.move_to_target(selection, MoveTarget(patch_name="current"))
+    commit = repository.stg.patch_commit("current")
+    assert repository.commands.run("git", "show", f"{commit}:new.txt") == (
+        "two\n" if scope == "lines" else "one\ntwo\nthree\n"
+    )
+    if applied:
+        assert path.read_text() == "one\ntwo\nthree\n"
+    elif scope == "lines":
+        assert path.read_text() == "one\nthree\n"
+    else:
+        assert not path.exists()
+    assert not repository.has_conflicts()
+
+
+@pytest.mark.parametrize("newer_target", [True, False])
+def test_squash_into_named_target(hunk_repository: StGitRepository, newer_target: bool) -> None:
+    repository = hunk_repository
+    commands = repository.commands
+    (repository.root / "text.txt").write_text("first\n")
+    commands.run("stg", "refresh")
+    commands.run("stg", "new", "-m", "Middle message", "middle")
+    commands.run("stg", "new", "-m", "Second message", "second")
+    (repository.root / "other.txt").write_text("second\n")
+    commands.run("stg", "refresh")
+    source, target = ("current", "second") if newer_target else ("second", "current")
+    before = commands.run("git", "rev-parse", "HEAD^{tree}")
+    template = repository.squash_message_template(source, target)
+    assert "Second message" in template
+    assert "current" in template.lower()
+    assert len(repository.load_stack()) == 3
+    repository.move_to_target(
+        ChangeSelection(MoveTarget(patch_name=source), (), whole_patch=True),
+        MoveTarget(patch_name=target),
+        message="Combined message\n\nDetails\n",
+    )
+    patches = {patch.name: patch for patch in repository.load_stack()}
+    assert source not in patches
+    assert patches[target].description == "Combined message"
+    assert {file.path for file in patches[target].files} == {"text.txt", "other.txt"}
+    assert commands.run("git", "rev-parse", "HEAD^{tree}") == before
+    assert (
+        commands.run("git", "log", "-1", "--format=%B", repository.stg.patch_commit(target))
+        == "Combined message\n\nDetails\n\n"
+    )
+
+
+@pytest.mark.parametrize("source_status", ["current", "unapplied", "hidden"])
+@pytest.mark.parametrize("target", ["staged", "unstaged"])
+def test_move_added_patch_file_to_working_area(
+    hunk_repository: StGitRepository, source_status: str, target: ChangeArea
+) -> None:
+    repository = hunk_repository
+    path = repository.root / "new.bin"
+    content = b"\0one\xfftwo\0"
+    path.write_bytes(content)
+    repository.git.stage_files((path.name,))
+    repository.commands.run("stg", "refresh", "--index")
+    if source_status != "current":
+        repository.commands.run("stg", "pop")
+        if source_status == "hidden":
+            repository.commands.run("stg", "hide", "current")
+    repository.move_to_target(
+        ChangeSelection(MoveTarget(patch_name="current"), (path.name,)),
+        MoveTarget(change_area=target),
+    )
+    assert path.read_bytes() == content
+    assert not repository.load_stack()[0].files
+    assert (path.name in {file.path for file in repository.load_staged_changes()}) == (
+        target == "staged"
+    )
+    assert (path.name in {file.path for file in repository.load_unstaged_changes()}) == (
+        target == "unstaged"
+    )
+
+
+@pytest.mark.parametrize("target_applied", [True, False])
+def test_move_untracked_binary_to_patch(
+    hunk_repository: StGitRepository, target_applied: bool
+) -> None:
+    repository = hunk_repository
+    if not target_applied:
+        repository.commands.run("stg", "pop")
+    path = repository.root / "new.bin"
+    content = b"\0one\xfftwo\0"
+    path.write_bytes(content)
+    repository.move_to_target(
+        ChangeSelection(MoveTarget(change_area="unstaged"), (path.name,)),
+        MoveTarget(patch_name="current"),
+    )
+    assert repository.load_stack()[0].files[0].path == path.name
+    assert path.exists() == target_applied
+    if path.exists():
+        assert path.read_bytes() == content
+    assert not repository.has_local_changes()
+
+
+@pytest.mark.parametrize("source_hidden", [False, True])
+def test_squash_unapplied_patch_into_applied_target(
+    hunk_repository: StGitRepository, source_hidden: bool
+) -> None:
+    repository = hunk_repository
+    commands = repository.commands
+    commands.run("stg", "new", "-m", "Source", "source")
+    (repository.root / "text.txt").write_text("source\n")
+    commands.run("stg", "refresh")
+    commands.run("stg", "pop")
+    if source_hidden:
+        commands.run("stg", "hide", "source")
+    assert "Source" in repository.squash_message_template("source", "current")
+    repository.move_to_target(
+        ChangeSelection(MoveTarget(patch_name="source"), (), whole_patch=True),
+        MoveTarget(patch_name="current"),
+        message="Combined\n",
+    )
+    (patch,) = repository.load_stack()
+    assert patch.name == "current"
+    assert "+source" in patch.diff_text
+
+
+@pytest.mark.parametrize("source_area", ["staged", "unstaged"])
+@pytest.mark.parametrize("scope", ["files", "hunk", "lines"])
+def test_move_working_changes_to_other_area(
+    hunk_repository: StGitRepository, source_area: ChangeArea, scope: str
+) -> None:
+    repository = hunk_repository
+    path = repository.root / "text.txt"
+    path.write_text(
+        path.read_text().replace("line 10\n", "changed\n").replace("line 70\n", "remaining\n")
+    )
+    if source_area == "staged":
+        repository.git.stage_files((path.name,))
+    before = path.read_bytes()
+    files = (
+        repository.load_staged_changes()
+        if source_area == "staged"
+        else repository.load_unstaged_changes()
+    )
+    file = files[0]
+    hunk = file.hunks[0]
+    rows = hunk.diff_text.splitlines()
+    selection = ChangeSelection(
+        MoveTarget(change_area=source_area),
+        (path.name,),
+        hunk_diff=hunk.diff_text if scope == "hunk" else None,
+        lines=HunkLineSelection(
+            file.path, hunk.diff_text, rows.index("+changed"), rows.index("+changed")
+        )
+        if scope == "lines"
+        else None,
+    )
+    repository.move_to_target(
+        selection, MoveTarget(change_area="staged" if source_area == "unstaged" else "unstaged")
+    )
+    assert path.read_bytes() == before
+    staged = repository.commands.run("git", "diff", "--cached", "--no-ext-diff")
+    assert ("+changed" in staged) == (source_area == "unstaged")
+    assert ("+remaining" in staged) == (
+        source_area == "unstaged" if scope == "files" else source_area == "staged"
+    )
+
+
+def test_target_move_rolls_back_if_local_snapshot_cannot_be_restored(
+    hunk_repository: StGitRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = hunk_repository
+    commands = repository.commands
+    path = repository.root / "text.txt"
+    commands.run("stg", "new", "-m", "Later", "later")
+    path.write_text(path.read_text().replace("line 10\n", "selected\n"))
+    repository.git.stage_files((path.name,))
+    path.write_text(path.read_text().replace("line 90\n", "unstaged\n"))
+    (repository.root / "untracked").write_text("keep\n")
+    before = path.read_bytes()
+    index = repository.git.index_tree()
+    head = commands.run("git", "rev-parse", "HEAD")
+    series = repository.stg.series()
+
+    def fail(*args: object) -> str:
+        raise RepositoryError("snapshot failed")
+
+    monkeypatch.setattr(repository.git, "create_stash", fail)
+    with pytest.raises(RepositoryError, match="snapshot failed"):
+        repository.move_to_target(
+            ChangeSelection(MoveTarget(change_area="staged"), (path.name,)),
+            MoveTarget(patch_name="current"),
+        )
+    assert path.read_bytes() == before
+    assert repository.git.index_tree() == index
+    assert commands.run("git", "rev-parse", "HEAD") == head
+    assert repository.stg.series() == series
+    assert (repository.root / "untracked").read_text() == "keep\n"
+    assert not repository.stack_operation_pending
+
+
+def test_target_move_conflict_can_be_undone(hunk_repository: StGitRepository) -> None:
+    repository = hunk_repository
+    commands = repository.commands
+    path = repository.root / "text.txt"
+    path.write_text(path.read_text().replace("line 10\n", "selected\n"))
+    commands.run("stg", "refresh")
+    commands.run("stg", "new", "-m", "Dependent", "dependent")
+    path.write_text(path.read_text().replace("selected\n", "dependent\n"))
+    commands.run("stg", "refresh")
+    head = commands.run("git", "rev-parse", "HEAD")
+    path.write_text(path.read_text().replace("line 40\n", "staged\n"))
+    repository.git.stage_files((path.name,))
+    index = repository.git.index_tree()
+    path.write_text(path.read_text().replace("line 90\n", "unstaged\n"))
+    before = path.read_bytes()
+    with pytest.raises(RepositoryError):
+        repository.move_to_target(
+            ChangeSelection(MoveTarget(patch_name="current"), (path.name,)),
+            MoveTarget(change_area="staged"),
+        )
+    assert repository.has_conflicts()
+    assert repository.stack_operation_pending
+    repository.undo_stack_operation()
+    assert not repository.has_conflicts()
+    assert commands.run("git", "rev-parse", "HEAD") == head
+    assert repository.git.index_tree() == index
+    assert path.read_bytes() == before
+
+
+def test_target_move_rejects_stale_lines_without_changing_stack(
+    hunk_repository: StGitRepository,
+) -> None:
+    repository = hunk_repository
+    path = repository.root / "text.txt"
+    path.write_text(path.read_text().replace("line 10\n", "selected\n"))
+    file = repository.load_unstaged_changes()[0]
+    hunk = file.hunks[0]
+    row = hunk.diff_text.splitlines().index("+selected")
+    selection = ChangeSelection(
+        MoveTarget(change_area="unstaged"),
+        (path.name,),
+        lines=HunkLineSelection(file.path, hunk.diff_text, row, row),
+    )
+    path.write_text(path.read_text().replace("selected\n", "edited again\n"))
+    before = path.read_bytes()
+    index = repository.git.index_tree()
+    with pytest.raises(RepositoryError):
+        repository.move_to_target(selection, MoveTarget(patch_name="current"))
+    assert path.read_bytes() == before
+    assert repository.git.index_tree() == index
+    assert not repository.load_stack()[0].files
+
+
+@pytest.mark.parametrize("part", ["addition", "deletion", "replacement"])
+@pytest.mark.parametrize("source_status", ["applied", "unapplied", "hidden"])
+@pytest.mark.parametrize("target_status", ["older", "newer", "unapplied", "hidden"])
+def test_move_selected_lines_between_arbitrary_patches(
+    hunk_repository: StGitRepository, part: str, source_status: str, target_status: str
+) -> None:
+    repository = hunk_repository
+    commands = repository.commands
+    path = repository.root / "text.txt"
+    base = path.read_text()
+    commands.run("stg", "new", "-m", "Middle", "middle")
+    commands.run("stg", "new", "-m", "Source", "source")
+    path.write_text(base.replace("line 10\n", "first\nsecond\n").replace("line 70\n", "keep\n"))
+    commands.run("stg", "refresh")
+    commands.run("stg", "new", "-m", "Middle above", "middle-above")
+    commands.run("stg", "new", "-m", "Target", "target")
+    if source_status != "applied":
+        for name in ("target", "middle-above", "source"):
+            commands.run("stg", "pop", name)
+        if source_status == "hidden":
+            commands.run("stg", "hide", "source")
+    elif target_status in ("unapplied", "hidden"):
+        commands.run("stg", "pop", "target")
+    if target_status == "hidden":
+        commands.run("stg", "hide", "target")
+    target = "current" if target_status == "older" else "target"
+    # For a newer applied destination with an unapplied source, apply the
+    # independent target without applying the source.
+    if target_status == "newer" and source_status != "applied":
+        commands.run("stg", "push", "target")
+    series = repository.stg.series()
+    file = next(patch for patch in repository.load_stack() if patch.name == "source").files[0]
+    hunk = file.hunks[0]
+    rows = hunk.diff_text.splitlines()
+    first = rows.index("+first" if part == "addition" else "-line 10")
+    last = rows.index(
+        "-line 10" if part == "deletion" else "+second" if part == "replacement" else "+first"
+    )
+    before = path.read_bytes()
+    repository.move_to_target(
+        ChangeSelection(
+            MoveTarget(patch_name="source"),
+            (path.name,),
+            lines=HunkLineSelection(file.path, hunk.diff_text, first, last),
+        ),
+        MoveTarget(patch_name=target),
+    )
+    patches = {patch.name: patch for patch in repository.load_stack()}
+    assert repository.stg.series() == series
+    assert ("+first" in patches[target].diff_text) == (part != "deletion")
+    assert ("-line 10" in patches[target].diff_text) == (part != "addition")
+    assert ("+first" in patches["source"].diff_text) == (part == "deletion")
+    assert ("-line 10" in patches["source"].diff_text) == (part == "addition")
+    assert "+keep" in patches["source"].diff_text
+    assert not patches["middle"].files
+    assert not patches["middle-above"].files
+    if source_status == "applied" and target_status in ("older", "newer"):
+        assert path.read_bytes() == before
+    assert not repository.has_local_changes()
+
+
+@pytest.mark.parametrize("hidden", [True, False])
+def test_squash_two_unapplied_patches_combines_all_changes(
+    hunk_repository: StGitRepository, hidden: bool
+) -> None:
+    repository = hunk_repository
+    commands = repository.commands
+    (repository.root / "text.txt").write_text("first\n")
+    commands.run("stg", "refresh")
+    commands.run("stg", "new", "-m", "Second", "second")
+    (repository.root / "other.txt").write_text("second\n")
+    commands.run("stg", "refresh")
+    commands.run("stg", "pop", "second")
+    commands.run("stg", "pop", "current")
+    if hidden:
+        commands.run("stg", "hide", "current")
+        commands.run("stg", "hide", "second")
+    repository.move_to_target(
+        ChangeSelection(MoveTarget(patch_name="current"), (), whole_patch=True),
+        MoveTarget(patch_name="second"),
+        message="Combined\n",
+    )
+    (patch,) = repository.load_stack()
+    assert patch.name == "second"
+    assert {file.path for file in patch.files} == {"text.txt", "other.txt"}
