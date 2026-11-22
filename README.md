@@ -1,7 +1,7 @@
 # StGit Layers
 
 A Textual browser for StGit repositories, with a patch tree and a read-only diff
-preview. Stage, unstage, discard, and move files or individual hunks between layers.
+preview. Stage, unstage, discard, and move files, hunks, or selected lines between layers.
 
 ## Requirements
 
@@ -115,14 +115,21 @@ These commands apply when the **tree** is focused.
 ### Diff preview
 
 These commands apply when the **diff preview** is focused.
+For patch transfers, **s** moves toward older patches and **d** toward newer
+patches, regardless of tree order.
 
 | Key | Selected item | Action |
 | --- | --- | --- |
 | **n / p** | Any | Select the next / previous hunk in displayed tree order, including hunks in collapsed files. Focus stays in the preview. |
 | **Enter** | Unstaged/Staged file or hunk | Stage/Unstage the selection; selecting a file stages/unstages all its hunks. |
 | **s** | Unstaged file or hunk | Stage only the selected added/removed lines, within a single hunk. |
+| **s** | Staged file or hunk | Move only the selected added/removed lines into the current patch, within a single hunk. Other staged and unstaged changes are preserved. |
+| **s** | Applied patch, file, or hunk | Move selected lines within one hunk to the adjacent older applied patch. |
+| **d** | Other applied patch, file, or hunk | Move selected lines within one hunk to the adjacent newer applied patch. |
+| **d** | Current patch, file, or hunk | Move selected lines within one hunk out of the current patch into staged changes, preserving other staged edits and working-tree contents. |
 | **d** | Staged file or hunk | Unstage only the selected added/removed lines, within a single hunk. |
 | **d** | Unstaged file or hunk | Confirm, then discard only the selected added/removed lines within a single hunk. Staged changes are preserved. **Discard cannot be undone.** |
+| **Delete** | Unstaged/Staged changes or patch | Confirm, then discard only the selected added/removed lines within one hunk. Staged lines are removed from both the index and working tree; patch lines are removed from that patch. Other changes are preserved. |
 | **w** | Any | Toggle word wrap in the diff preview. |
 | **Arrow keys** | Any | Move through the diff. |
 | **Shift+Arrow keys** | Any | Select whole lines: Up/Left moves backward; Down/Right moves forward. Reversing direction shrinks the selection back to the current line. |

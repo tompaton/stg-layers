@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import TypeVar
@@ -6,8 +7,8 @@ from typing import TypeVar
 from stg_layers.commands import CommandRunner
 from stg_layers.errors import RepositoryError
 from stg_layers.git import Git, extract_hunk_diff
-from stg_layers.models import FileChange, Patch, PatchStatus
-from stg_layers.partial_diff import HunkLineSelection
+from stg_layers.models import FileChange, FileStatus, Patch, PatchStatus
+from stg_layers.partial_diff import HunkLineSelection, selected_lines_patch
 from stg_layers.stg import StGit
 
 
@@ -22,6 +23,14 @@ class PatchChangeMoveResult(StrEnum):
     STACK_EDGE = "stack_edge"
     APPLICATION_BOUNDARY = "application_boundary"
     SOURCE_NOT_APPLIED = "source_not_applied"
+
+
+@dataclass(frozen=True)
+class _PatchLineMove:
+    path: str
+    removal_diff: str
+    addition_diff: str
+    addition_path: str
 
 
 _T = TypeVar("_T")
@@ -264,12 +273,23 @@ class StGitRepository:
             patch_name, tuple((path, None) for path in paths), toward_newer=toward_newer
         )
 
+    def move_patch_lines(
+        self, patch_name: str, selection: HunkLineSelection, *, toward_newer: bool
+    ) -> tuple[PatchChangeMoveResult, str | None]:
+        return self._move_patch_changes(
+            patch_name,
+            ((selection.path, selection.hunk_diff),),
+            toward_newer=toward_newer,
+            line_selection=selection,
+        )
+
     def _move_patch_changes(
         self,
         patch_name: str,
         changes: tuple[tuple[str, str | None], ...],
         *,
         toward_newer: bool,
+        line_selection: HunkLineSelection | None = None,
     ) -> tuple[PatchChangeMoveResult, str | None]:
         self._ensure_patch_stack_is_safe()
         series = self.stg.series()
@@ -293,6 +313,9 @@ class StGitRepository:
             (path, self._selected_patch_change_diff(source_patch, patch_name, path, hunk_diff))
             for path, hunk_diff in changes
         ]
+        line_move = (
+            self._selected_patch_line_move(source_patch, line_selection) if line_selection else None
+        )
         popped_patches = tuple(
             name
             for name, status, _ in series[patch_index + 1 :]
@@ -300,6 +323,11 @@ class StGitRepository:
         )
 
         def move_all(stg: StGit) -> None:
+            if line_move is not None:
+                self._move_patch_lines_sequence(
+                    stg, patch_name, line_move, popped_patches, toward_newer
+                )
+                return
             for path, selected_diff in selected_diffs:
                 self._move_patch_change_sequence(
                     stg, patch_name, path, selected_diff, popped_patches, toward_newer
@@ -308,6 +336,47 @@ class StGitRepository:
         if selected_diffs:
             self._run_stack_transaction(move_all)
         return PatchChangeMoveResult.MOVED, target_name
+
+    @staticmethod
+    def _selected_patch_line_move(source: Patch, selection: HunkLineSelection) -> _PatchLineMove:
+        # Shared preflight has already checked the source file and hunk.
+        file = next(file for file in source.files if file.path == selection.path)
+        addition_file = (
+            replace(file, path=file.source_path) if file.status == FileStatus.RENAMED else file
+        )
+        return _PatchLineMove(
+            file.path,
+            selected_lines_patch(file, selection, stage=False),
+            selected_lines_patch(addition_file, selection, stage=True),
+            addition_file.path,
+        )
+
+    def _move_patch_lines_sequence(
+        self,
+        stg: StGit,
+        source_name: str,
+        change: _PatchLineMove,
+        popped_patches: tuple[str, ...],
+        toward_newer: bool,
+    ) -> None:
+        for name in reversed(popped_patches):
+            stg.pop(name)
+        original_tree = self.git.index_tree()
+        self.git.apply_index_diff(change.removal_diff, reverse=True, unidiff_zero=True)
+        stg.refresh()
+        self.git.restore_worktree(change.path)
+        if not toward_newer:
+            stg.pop(source_name)
+            self.git.apply_index_diff(change.addition_diff, unidiff_zero=True)
+            stg.refresh()
+            self.git.restore_worktree(change.addition_path)
+            stg.push(source_name, set_tree=True)
+            # Keep the original combined tree, including the order of split replacement lines.
+            self.git.set_index_tree(original_tree)
+            stg.refresh()
+            self.git.restore_worktree(change.path)
+        for name in popped_patches:
+            stg.push(name, set_tree=True)
 
     @staticmethod
     def _patch_change_destination(
@@ -573,6 +642,38 @@ class StGitRepository:
     def refresh_staged_hunk_to_current_patch(self, path: str, hunk_diff: str) -> None:
         self._move_current_patch_hunk(path, hunk_diff, spill=False)
 
+    def refresh_staged_lines_to_current_patch(self, selection: HunkLineSelection) -> None:
+        self._ensure_patch_stack_is_safe()
+        if not any(patch.status == PatchStatus.CURRENT for patch in self.load_stack()):
+            raise RepositoryError("There is no current patch to refresh.")
+        file = next(
+            (file for file in self.git.load_staged_changes() if file.path == selection.path), None
+        )
+        if file is None:
+            raise RepositoryError(f"No staged changes remain for {selection.path!r}.")
+        if file.status == FileStatus.RENAMED:
+            # Move content into the existing HEAD path; keep the rename staged.
+            file = replace(file, path=file.source_path)
+        diff = selected_lines_patch(file, selection, stage=True)
+        with self.git.temporary_index():
+            self.git.apply_index_diff(diff, unidiff_zero=True)
+            self.stg.refresh()
+
+    def move_current_patch_lines_to_staged(self, selection: HunkLineSelection) -> None:
+        self._ensure_patch_stack_is_safe()
+        current = next(
+            (patch for patch in self.load_stack() if patch.status == PatchStatus.CURRENT), None
+        )
+        if current is None:
+            raise RepositoryError("There is no current patch to move lines from.")
+        file = next((file for file in current.files if file.path == selection.path), None)
+        if file is None:
+            raise RepositoryError(f"The selected hunk in {selection.path!r} is no longer present.")
+        diff = selected_lines_patch(file, selection, stage=False)
+        with self.git.temporary_index():
+            self.git.apply_index_diff(diff, reverse=True, unidiff_zero=True)
+            self.stg.refresh()
+
     def spill_current_patch_hunk(self, path: str, hunk_diff: str) -> None:
         self._move_current_patch_hunk(path, hunk_diff, spill=True)
 
@@ -598,8 +699,23 @@ class StGitRepository:
     def unstaged_diffstat(self, paths: tuple[str, ...], *, hunk_diff: str | None = None) -> str:
         return self.git.unstaged_diffstat(paths, hunk_diff=hunk_diff)
 
-    def discarded_lines_diffstat(self, selection: HunkLineSelection) -> str:
-        return self.git.discarded_lines_diffstat(selection)
+    def discarded_lines_diffstat(
+        self, selection: HunkLineSelection, *, staged: bool = False, patch_name: str | None = None
+    ) -> str:
+        if patch_name is not None:
+            return self.git.diffstat(self._discard_patch_lines_diff(patch_name, selection))
+        return self.git.discarded_lines_diffstat(selection, staged=staged)
+
+    def _discard_patch_lines_diff(self, name: str, selection: HunkLineSelection) -> str:
+        patch = next((patch for patch in self.load_stack() if patch.name == name), None)
+        file = (
+            next((file for file in patch.files if file.path == selection.path), None)
+            if patch
+            else None
+        )
+        if file is None:
+            raise RepositoryError(f"No changes remain for {selection.path!r} in patch {name!r}.")
+        return selected_lines_patch(file, selection, stage=False)
 
     def discard_files(self, paths: tuple[str, ...]) -> None:
         self._ensure_patch_stack_is_safe()
@@ -613,9 +729,36 @@ class StGitRepository:
         self._ensure_patch_stack_is_safe()
         self.git.move_selected_lines(selection, stage=stage)
 
-    def discard_selected_lines(self, selection: HunkLineSelection) -> None:
+    def discard_selected_lines(
+        self, selection: HunkLineSelection, *, staged: bool = False, patch_name: str | None = None
+    ) -> None:
         self._ensure_patch_stack_is_safe()
-        self.git.discard_selected_lines(selection)
+        if patch_name is None:
+            self.git.discard_selected_lines(selection, staged=staged)
+            return
+        diff = self._discard_patch_lines_diff(patch_name, selection)
+
+        def discard(stg: StGit) -> None:
+            series = stg.series()
+            source_index = next(
+                index for index, (name, _, _) in enumerate(series) if name == patch_name
+            )
+            above = [
+                name
+                for name, status, _ in series[source_index + 1 :]
+                if status in (PatchStatus.APPLIED, PatchStatus.CURRENT)
+            ]
+            if above:
+                stg.pop(above[0])
+            with self.git.temporary_index():
+                self.git.set_index_tree(stg.patch_commit(patch_name))
+                self.git.apply_index_diff(diff, reverse=True, unidiff_zero=True)
+                tree = self.git.index_tree()
+            stg.set_patch_tree(patch_name, tree)
+            for name in above:
+                stg.push(name)
+
+        self._run_stack_transaction(discard)
 
     def stage_hunk(self, path: str, hunk_index: int) -> None:
         self.git.stage_hunk(path, hunk_index)

@@ -105,10 +105,16 @@ class DeletePatchDialog(ModalScreen[bool]):
 
 
 class DiscardChangesDialog(DeletePatchDialog):
+    def __init__(
+        self, patch_name: str, *, diffstat: str = "", source: str | None = "unstaged"
+    ) -> None:
+        super().__init__(patch_name, diffstat=diffstat)
+        self.source = source or "unstaged"
+
     def compose(self) -> ComposeResult:
         with Vertical(id="delete-dialog"):
-            yield Static(Text(f"Discard unstaged changes in {self.patch_name}?"))
-            yield Static("This cannot be undone. Staged changes will be kept.")
+            yield Static(Text(f"Discard {self.source} changes in {self.patch_name}?"))
+            yield Static("This cannot be undone. Other changes will be kept.")
             with VerticalScroll(id="delete-stat"):
                 yield Static(Text(self.diffstat or "No changes.", no_wrap=True))
             with Horizontal(id="delete-actions"):

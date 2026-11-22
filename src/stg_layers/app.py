@@ -61,11 +61,19 @@ class StackReader(Protocol):
 
     def spill_current_patch_files(self, paths: tuple[str, ...]) -> None: ...
 
+    def move_patch_lines(
+        self, patch_name: str, selection: HunkLineSelection, *, toward_newer: bool
+    ) -> tuple[PatchChangeMoveResult, str | None]: ...
+
     def move_patch_changes(
         self, patch_name: str, paths: tuple[str, ...], *, toward_newer: bool
     ) -> tuple[PatchChangeMoveResult, str | None]: ...
 
     def refresh_staged_hunk_to_current_patch(self, path: str, hunk_diff: str) -> None: ...
+
+    def refresh_staged_lines_to_current_patch(self, selection: HunkLineSelection) -> None: ...
+
+    def move_current_patch_lines_to_staged(self, selection: HunkLineSelection) -> None: ...
 
     def spill_current_patch_hunk(self, path: str, hunk_diff: str) -> None: ...
 
@@ -73,7 +81,9 @@ class StackReader(Protocol):
 
     def unstaged_diffstat(self, paths: tuple[str, ...], *, hunk_diff: str | None = None) -> str: ...
 
-    def discarded_lines_diffstat(self, selection: HunkLineSelection) -> str: ...
+    def discarded_lines_diffstat(
+        self, selection: HunkLineSelection, *, staged: bool = False, patch_name: str | None = None
+    ) -> str: ...
 
     def discard_files(self, paths: tuple[str, ...]) -> None: ...
 
@@ -81,7 +91,9 @@ class StackReader(Protocol):
 
     def move_selected_lines(self, selection: HunkLineSelection, *, stage: bool) -> None: ...
 
-    def discard_selected_lines(self, selection: HunkLineSelection) -> None: ...
+    def discard_selected_lines(
+        self, selection: HunkLineSelection, *, staged: bool = False, patch_name: str | None = None
+    ) -> None: ...
 
     def stage_hunk(self, path: str, hunk_index: int) -> None: ...
 
@@ -637,24 +649,22 @@ class StgLayersApp(App[None]):
         if not allow_groups and not item.is_file_or_hunk:
             return
         if item.is_staged or item.is_unstaged:
-            await self._move_change(toward_newer=item.is_staged, node=node, advance_selection=True)
+            await self._move_change(toward_newer=item.is_staged, advance_selection=True)
 
     async def _move_change(
         self,
         *,
         toward_newer: bool,
-        node: TreeNode[TreeItem] | None = None,
         advance_selection: bool = False,
         lines_only: bool = False,
     ) -> None:
-        if node is None:
-            node = self.query_one("#patch-tree", LayerTree).cursor_node
+        node = self.query_one("#patch-tree", LayerTree).cursor_node
         if node is None:
             return
         item = self._shown_item if lines_only else node.data
         if item is None:
             return
-        if lines_only and (not item.is_working_change or (item.is_staged and not toward_newer)):
+        if lines_only and not (item.is_working_change or item.is_patch or item.is_patch_change):
             return
         async with self._handle_repository_conflict_error(), self._handle_move_status():
             line_selection = (
@@ -702,7 +712,7 @@ class StgLayersApp(App[None]):
         toward_newer: bool,
         line_selection: HunkLineSelection | None = None,
     ) -> TreeItem:
-        if item.is_patch:
+        if item.is_patch and line_selection is None:
             return await self._reorder_selected_patch(item, toward_newer=toward_newer)
         elif item.is_unstaged:
             if toward_newer:
@@ -713,19 +723,19 @@ class StgLayersApp(App[None]):
                 raise MoveNotPerformed(
                     "Unstaged changes are at the edge." if item.is_file_group else ""
                 )
-            return await self._move_changes_between_areas(item, node, line_selection=line_selection)
+            return await self._move_changes_between_areas(item, node, line_selection)
         elif item.is_staged:
             if toward_newer:
-                return await self._move_changes_between_areas(
-                    item, node, line_selection=line_selection
-                )
+                return await self._move_changes_between_areas(item, node, line_selection)
             else:
-                return await self._move_staged_changes_to_current_patch(item, node)
+                return await self._move_staged_changes_to_current_patch(item, node, line_selection)
         elif item.patch_name is not None:
             if self._is_current(item) and toward_newer:
-                return await self._spill_current_patch_changes(item, node)
+                return await self._spill_current_patch_changes(item, node, line_selection)
             else:
-                return await self._move_patch_changes(item, node, toward_newer=toward_newer)
+                return await self._move_patch_changes(
+                    item, node, line_selection, toward_newer=toward_newer
+                )
 
         raise MoveNotPerformed()
 
@@ -756,16 +766,27 @@ class StgLayersApp(App[None]):
         return item.as_selection()
 
     async def _move_patch_changes(
-        self, item: TreeItem, node: TreeNode[TreeItem], *, toward_newer: bool
+        self,
+        item: TreeItem,
+        node: TreeNode[TreeItem],
+        line_selection: HunkLineSelection | None,
+        *,
+        toward_newer: bool,
     ) -> TreeItem:
-        paths = self._move_paths(item, node)
         source_patch = self._get_patch(item.patch_name)
         if source_patch is None:
             raise MoveNotPerformed()
         patch_name = source_patch.name
         direction = "newer" if toward_newer else "older"
         self._show_status(f"Moving {item.title} {direction} from patch {patch_name}...")
-        if item.is_hunk:
+        if line_selection is not None:
+            result, moved_to = await asyncio.to_thread(
+                self.repository.move_patch_lines,
+                patch_name,
+                line_selection,
+                toward_newer=toward_newer,
+            )
+        elif item.is_hunk:
             result, moved_to = await asyncio.to_thread(
                 self.repository.move_patch_change,
                 patch_name,
@@ -777,21 +798,24 @@ class StgLayersApp(App[None]):
             result, moved_to = await asyncio.to_thread(
                 self.repository.move_patch_changes,
                 patch_name,
-                paths,
+                self._move_paths(item, node),
                 toward_newer=toward_newer,
             )
         if result != PatchChangeMoveResult.MOVED:
             raise PatchChangeMoveError(result, patch_name)
         if moved_to is None:
             raise MoveNotPerformed(f"Could not determine the destination patch for {item.title}.")
-        return item.as_selection(patch_name=moved_to)
+        return (
+            item.as_selection()
+            if line_selection is not None
+            else item.as_selection(patch_name=moved_to)
+        )
 
     async def _move_changes_between_areas(
         self,
         item: TreeItem,
         node: TreeNode[TreeItem],
-        *,
-        line_selection: HunkLineSelection | None = None,
+        line_selection: HunkLineSelection | None,
     ) -> TreeItem:
         stage = item.is_unstaged
         if line_selection is not None:
@@ -816,13 +840,21 @@ class StgLayersApp(App[None]):
         return preferred_selection
 
     async def _move_staged_changes_to_current_patch(
-        self, item: TreeItem, node: TreeNode[TreeItem]
+        self,
+        item: TreeItem,
+        node: TreeNode[TreeItem],
+        line_selection: HunkLineSelection | None,
     ) -> TreeItem:
         paths = self._move_paths(item, node)
         current_patch = self._current_patch
         if current_patch is None:
             raise MoveNotPerformed("There is no current patch to refresh.")
         self._show_status(f"Moving {item.title} into the current patch...")
+        if line_selection is not None:
+            await asyncio.to_thread(
+                self.repository.refresh_staged_lines_to_current_patch, line_selection
+            )
+            return item.as_selection()
         if item.is_hunk:
             await asyncio.to_thread(
                 self.repository.refresh_staged_hunk_to_current_patch,
@@ -834,8 +866,17 @@ class StgLayersApp(App[None]):
         return item.as_selection(patch_name=current_patch.name)
 
     async def _spill_current_patch_changes(
-        self, item: TreeItem, node: TreeNode[TreeItem]
+        self,
+        item: TreeItem,
+        node: TreeNode[TreeItem],
+        line_selection: HunkLineSelection | None,
     ) -> TreeItem:
+        if line_selection is not None:
+            self._show_status(f"Moving selected lines in {item.title} into staged changes...")
+            await asyncio.to_thread(
+                self.repository.move_current_patch_lines_to_staged, line_selection
+            )
+            return item.as_selection()
         paths = self._move_paths(item, node)
         self._show_status(f"Moving {item.title} out of the current patch...")
         if item.is_hunk:
@@ -846,6 +887,15 @@ class StgLayersApp(App[None]):
             await asyncio.to_thread(self.repository.spill_current_patch_files, paths)
         return item.as_selection(change_area="staged")
 
+    async def action_discard_preview_lines(self) -> None:
+        item = self._shown_item
+        if item is None or not (item.is_working_change or item.is_patch or item.is_patch_change):
+            return
+        async with self._handle_repository_conflict_error():
+            selection = self.query_one("#diff-view", DiffPreview).selected_lines(item)
+            if await self._ensure_repository_ready():
+                await self._confirm_discard_selected_lines(item, selection)
+
     async def _confirm_discard_selected_lines(
         self, item: TreeItem, selection: HunkLineSelection
     ) -> None:
@@ -853,9 +903,18 @@ class StgLayersApp(App[None]):
             if result:
                 self.run_worker(self._discard_selected_lines(item, selection), exclusive=True)
 
-        diffstat = await asyncio.to_thread(self.repository.discarded_lines_diffstat, selection)
+        diffstat = await asyncio.to_thread(
+            self.repository.discarded_lines_diffstat,
+            selection,
+            staged=item.is_staged,
+            patch_name=item.patch_name,
+        )
         self.push_screen(
-            DiscardChangesDialog(f"selected lines of {selection.path}", diffstat=diffstat),
+            DiscardChangesDialog(
+                f"selected lines of {selection.path}",
+                diffstat=diffstat,
+                source=f"patch {item.patch_name}" if item.patch_name else item.change_area,
+            ),
             confirmed,
         )
 
@@ -864,7 +923,12 @@ class StgLayersApp(App[None]):
             return
         async with self._handle_repository_conflict_error():
             self._show_status(f"Discarding selected lines in {selection.path}...")
-            await asyncio.to_thread(self.repository.discard_selected_lines, selection)
+            await asyncio.to_thread(
+                self.repository.discard_selected_lines,
+                selection,
+                staged=item.is_staged,
+                patch_name=item.patch_name,
+            )
             await self._load_stack(
                 preferred_selection=item.as_selection(), expansion_fallback_path=selection.path
             )

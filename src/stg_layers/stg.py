@@ -171,6 +171,12 @@ class StGit:
                 raise RepositoryError(f"Could not write the patch message: {error}") from error
             self._mutate("edit", "--file", str(message_path), patch_ref)
 
+    def patch_commit(self, name: str) -> str:
+        return self.commands.run("stg", "id", self._patch_ref(name)).strip()
+
+    def set_patch_tree(self, name: str, tree: str) -> str:
+        return self._mutate("edit", "--set-tree", tree, self._patch_ref(name))
+
     def file_diff(self, patch_name: str, path: str) -> str:
         diff = self.show(patch_name, binary=True)
         try:

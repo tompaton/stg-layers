@@ -181,8 +181,10 @@ class Git:
                 )
         return self.diffstat("".join(diffs))
 
-    def discarded_lines_diffstat(self, selection: HunkLineSelection) -> str:
-        file = self._unstaged_file(selection.path)
+    def discarded_lines_diffstat(
+        self, selection: HunkLineSelection, *, staged: bool = False
+    ) -> str:
+        file = self._discard_line_file(selection, staged=staged)
         return self.diffstat(selected_lines_patch(file, selection, stage=False))
 
     def _unstaged_file(self, path: str) -> FileChange:
@@ -202,6 +204,12 @@ class Git:
         self.commands.run(
             "git", "apply", "--reverse", input_text=extract_hunk_diff(file, hunk_diff)
         )
+
+    def index_tree(self) -> str:
+        return self.commands.run("git", "write-tree").strip()
+
+    def set_index_tree(self, tree: str) -> None:
+        self.commands.run("git", "read-tree", tree)
 
     @contextmanager
     def temporary_index(self) -> Generator[None]:
@@ -308,14 +316,29 @@ class Git:
             input_text=patch,
         )
 
-    def discard_selected_lines(self, selection: HunkLineSelection) -> None:
-        file = next(
-            (file for file in self.load_unstaged_changes() if file.path == selection.path), None
-        )
+    def _discard_line_file(self, selection: HunkLineSelection, *, staged: bool) -> FileChange:
+        files = self.load_staged_changes() if staged else self.load_unstaged_changes()
+        file = next((file for file in files if file.path == selection.path), None)
         if file is None:
             raise RepositoryError(f"No changes remain for {selection.path!r}.")
+        return file
+
+    def discard_selected_lines(self, selection: HunkLineSelection, *, staged: bool = False) -> None:
+        file = self._discard_line_file(selection, staged=staged)
         patch = selected_lines_patch(file, selection, stage=False)
-        self.commands.run("git", "apply", "--reverse", "--unidiff-zero", input_text=patch)
+        if not staged:
+            self.commands.run("git", "apply", "--reverse", "--unidiff-zero", input_text=patch)
+            return
+        self.commands.run(
+            "git", "apply", "--check", "--reverse", "--unidiff-zero", input_text=patch
+        )
+        original_index = self.index_tree()
+        try:
+            self.apply_index_diff(patch, reverse=True, unidiff_zero=True)
+            self.commands.run("git", "apply", "--reverse", "--unidiff-zero", input_text=patch)
+        except RepositoryError:
+            self.set_index_tree(original_index)
+            raise
 
     def stage_hunk(self, path: str, hunk_index: int) -> None:
         if hunk_index < 0:
@@ -473,12 +496,15 @@ class Git:
     def apply_stash(self, commit: str) -> None:
         self.commands.run("git", "stash", "apply", "--index", commit)
 
-    def apply_index_diff(self, diff: str, *, reverse: bool = False) -> None:
+    def apply_index_diff(
+        self, diff: str, *, reverse: bool = False, unidiff_zero: bool = False
+    ) -> None:
         self.commands.run(
             "git",
             "apply",
             "--cached",
             "--binary",
+            *(("--unidiff-zero",) if unidiff_zero else ()),
             *(("--reverse",) if reverse else ()),
             input_text=diff,
         )

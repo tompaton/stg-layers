@@ -32,6 +32,7 @@ class DiffPreview(TextArea):
         Binding("enter", "apply_change", "Stage/unstage", priority=True),
         Binding("w", "toggle_word_wrap", "Word wrap", priority=True),
         Binding("s", "stage_selected_lines", "Stage lines", priority=True),
+        Binding("delete", "discard_preview_lines", "Discard lines", priority=True),
         Binding("d", "remove_selected_lines", "Unstage/discard lines", priority=True),
         Binding("shift+up,shift+left", "extend_line_selection(False)", show=False, priority=True),
         Binding("shift+down,shift+right", "extend_line_selection(True)", show=False, priority=True),
@@ -96,6 +97,9 @@ class DiffPreview(TextArea):
 
     async def action_remove_selected_lines(self) -> None:
         await self.app.run_action("remove_selected_lines")
+
+    async def action_discard_preview_lines(self) -> None:
+        await self.app.run_action("discard_preview_lines")
 
     def selected_lines(self, item: TreeItem) -> HunkLineSelection:
         first, last = sorted(self.selection)
