@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from textual.widgets import Tree
 from textual.widgets._tree import TreeNode
 
-from stg_layers.models import ChangeArea, FileChange, Patch, TreeItem
+from stg_layers.models import ChangeArea, FileChange, Patch, PatchStatus, TreeItem
 from stg_layers.tree_walker import find_selection_node, selected_file_expansion, walk_nodes
 
 
@@ -32,6 +32,7 @@ class TreeBuilder:
         unstaged: tuple[FileChange, ...],
         *,
         newest_first: bool,
+        omitted_patch_statuses: tuple[PatchStatus, ...] = (),
         preferred_selection: TreeItem | None = None,
         expansion_fallback_path: str | None = None,
     ) -> TreeBuildState:
@@ -51,9 +52,9 @@ class TreeBuilder:
         if newest_first:
             self.add_change_group(tree.root, "unstaged", unstaged)
             self.add_change_group(tree.root, "staged", staged)
-            self.add_patch_stack(tree.root, ordered_patches)
+            self.add_patch_stack(tree.root, ordered_patches, omitted_patch_statuses)
         else:
-            self.add_patch_stack(tree.root, ordered_patches)
+            self.add_patch_stack(tree.root, ordered_patches, omitted_patch_statuses)
             self.add_change_group(tree.root, "staged", staged)
             self.add_change_group(tree.root, "unstaged", unstaged)
 
@@ -78,14 +79,22 @@ class TreeBuilder:
     def add_patch_stack(
         root: TreeNode[TreeItem],
         patches: tuple[Patch, ...],
+        omitted_patch_statuses: tuple[PatchStatus, ...],
     ) -> None:
         item, label = TreeItem.for_patch_stack()
         patch_stack = root.add(label, data=item, expand=True)
         if not patches:
             patch_stack.add("No patches in this stack.", allow_expand=False)
             return
+        omitted_counts = dict.fromkeys(omitted_patch_statuses, 0)
         for patch in patches:
-            TreeBuilder.add_patch(patch_stack, patch)
+            if patch.status in omitted_counts:
+                omitted_counts[patch.status] += 1
+            else:
+                TreeBuilder.add_patch(patch_stack, patch)
+        for status, count in omitted_counts.items():
+            if count:
+                patch_stack.add(f"{count} {status.title()} patches not shown", allow_expand=False)
 
     @staticmethod
     def _matches_expansion_fallback(

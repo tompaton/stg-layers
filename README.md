@@ -21,9 +21,8 @@ stg-layers
 
 ## Tree layout
 
-The default order is **Unstaged changes → Staged changes → Patch stack**, with
-patches newest to oldest. The tree root shows the repository directory and branch;
-the title bar shows the remote URL, preferring `origin`.
+The tree root shows the repository directory and branch. The title bar shows the
+remote URL, preferring `origin`.
 
 | Item | Display and scope |
 | --- | --- |
@@ -43,6 +42,27 @@ Patch status markers are:
 | `-` | Unapplied patch |
 | `~` | Hidden patch |
 
+## View Settings
+
+Press **v** from either pane to open View Settings. Select **Apply** to use your
+choices, or press **Escape** or select **Cancel** to keep the current settings.
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| **Display order** | Newest first | Shows Unstaged changes → Staged changes → Patch stack, with patches newest to oldest. **Oldest first** reverses the section and patch order. |
+| **Show Hidden patches** | On | Shows hidden patches in the tree. |
+| **Show Unapplied patches** | On | Shows unapplied patches in the tree. |
+| **Wrap lines in diff preview** | Off | Wraps long lines to fit the diff pane. |
+
+When a filter omits patches, the end of the patch stack shows the count for that
+status, for example, `2 Hidden patches not shown` or
+`1 Unapplied patches not shown`. Filters stay active when you refresh.
+
+View Settings are saved when you select **Apply** and restored when you relaunch
+the app. They are shared across repositories and stored in `stg-layers/config.toml`
+under your user config directory. On Linux, this is
+`${XDG_CONFIG_HOME:-$HOME/.config}/stg-layers/config.toml`.
+
 ## Keyboard commands
 
 ### General and tree navigation
@@ -51,7 +71,7 @@ Patch status markers are:
 | --- | --- | --- |
 | **q** | Either pane | Quit. |
 | **r** | Either pane | Refresh repository state. |
-| **Shift+R** | Either pane | Reverse tree order. Movement shortcuts continue to follow the displayed direction. |
+| **v** | Either pane | Open [View Settings](#view-settings). |
 | **Tab / Shift+Tab** | Either pane | Move focus between the tree and diff preview. |
 | **Up / Down** | Tree | Select the previous / next visible node and update the preview. |
 | **Right** | Expandable tree node | Expand it, or move to its first child if already expanded. |
@@ -76,7 +96,7 @@ unchanged.
 ### Move changes and reorder patches
 
 **Ctrl+Up / Ctrl+Down** move in the displayed direction. This table describes the
-**default tree order**; the two keys swap roles after **Shift+R**.
+**default tree order**. The two keys swap roles in **Oldest first** order.
 
 | Selected item | Ctrl+Up — toward newer layers | Ctrl+Down — toward older layers |
 | --- | --- | --- |
@@ -134,7 +154,6 @@ patches, regardless of tree order.
 | **d** | Staged file or hunk | Unstage only the selected added/removed lines, within a single hunk. |
 | **d** | Unstaged file or hunk | Confirm, then discard only the selected added/removed lines within a single hunk. Staged changes are preserved. **Discard cannot be undone.** |
 | **Delete** | Unstaged/Staged changes or patch | Confirm, then discard only the selected added/removed lines within one hunk. Staged lines are removed from both the index and working tree; patch lines are removed from that patch. Other changes are preserved. |
-| **w** | Any | Toggle word wrap in the diff preview. |
 | **Arrow keys** | Any | Move through the diff. |
 | **Shift+Arrow keys** | Any | Select whole lines: Up/Left moves backward; Down/Right moves forward. Reversing direction shrinks the selection back to the current line. |
 | **Page Up / Page Down** | Any | Scroll the preview. The mouse wheel also scrolls. |

@@ -31,7 +31,6 @@ class DiffPreview(TextArea):
         Binding("n", "next_hunk", "Next hunk", priority=True),
         Binding("p", "previous_hunk", "Previous hunk", priority=True),
         Binding("enter", "apply_change", "Stage/unstage", priority=True),
-        Binding("w", "toggle_word_wrap", "Word wrap", priority=True),
         Binding("s", "stage_selected_lines", "Stage lines", priority=True),
         Binding("delete", "discard_preview_lines", "Discard lines", priority=True),
         Binding("d", "remove_selected_lines", "Unstage/discard lines", priority=True),
@@ -39,13 +38,13 @@ class DiffPreview(TextArea):
         Binding("shift+down,shift+right", "extend_line_selection(True)", show=False, priority=True),
     ]
 
-    def __init__(self, *, id: str | None = None) -> None:
+    def __init__(self, *, id: str | None = None, soft_wrap: bool = False) -> None:
         super().__init__(
             "",
             read_only=True,
             show_cursor=True,
             show_line_numbers=False,
-            soft_wrap=False,
+            soft_wrap=soft_wrap,
             compact=True,
             id=id,
         )
@@ -128,9 +127,6 @@ class DiffPreview(TextArea):
                     raise RepositoryError("Select added or removed lines within one diff hunk.")
                 return HunkLineSelection(path, diff, first[0] - start, last[0] - start)
         raise RepositoryError("Select lines within a single diff hunk.")
-
-    def action_toggle_word_wrap(self) -> None:
-        self.soft_wrap = not self.soft_wrap
 
     def _navigate_hunk(self, *, forward: bool) -> None:
         tree = self.app.query_one("#patch-tree", LayerTree)

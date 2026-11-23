@@ -2,7 +2,7 @@ from textual.binding import Binding
 from textual.widgets import TextArea, Tree
 from textual.widgets._tree import TreeNode
 
-from stg_layers.models import FileChange, Patch, TreeItem
+from stg_layers.models import FileChange, Patch, PatchStatus, TreeItem
 from stg_layers.tree_builder import TreeBuilder
 
 
@@ -95,6 +95,7 @@ class LayerTree(Tree[TreeItem]):
         unstaged: tuple[FileChange, ...],
         *,
         newest_first: bool,
+        omitted_patch_statuses: tuple[PatchStatus, ...] = (),
         preferred_selection: TreeItem | None = None,
         expansion_fallback_path: str | None = None,
     ) -> None:
@@ -103,6 +104,7 @@ class LayerTree(Tree[TreeItem]):
             staged,
             unstaged,
             newest_first=newest_first,
+            omitted_patch_statuses=omitted_patch_statuses,
             preferred_selection=preferred_selection,
             expansion_fallback_path=expansion_fallback_path,
         )

@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+from platformdirs import user_config_path
 from setproctitle import setproctitle
 
 from stg_layers.app import StgLayersApp
@@ -16,7 +17,8 @@ def main() -> None:
         raise SystemExit(1) from error
 
     setproctitle("stg-layers")
-    StgLayersApp(repository).run()
+    config_path = user_config_path("stg-layers", appauthor=False) / "config.toml"
+    StgLayersApp(repository, config_path=config_path).run()
 
 
 __all__ = ["main"]

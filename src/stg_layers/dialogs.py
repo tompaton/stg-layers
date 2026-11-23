@@ -4,10 +4,91 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, OptionList, Static, TextArea
+from textual.widgets import Button, Checkbox, OptionList, RadioButton, RadioSet, Static, TextArea
 
 from stg_layers.change_moves import MoveTarget
 from stg_layers.models import Patch, PatchStatus, TreeItem
+from stg_layers.settings import ViewSettings
+
+
+class ViewSettingsDialog(ModalScreen[ViewSettings | None]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+    DEFAULT_CSS = """
+    ViewSettingsDialog { align: center middle; }
+    #view-settings-dialog {
+        width: 48;
+        max-width: 95%;
+        height: auto;
+        max-height: 90%;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    #view-settings-title { text-style: bold; }
+    #view-settings-fields { height: auto; max-height: 45vh; margin: 1 0; }
+    #display-order { width: 100%; height: auto; }
+    #view-settings-actions { height: auto; align-horizontal: right; }
+    """
+
+    def __init__(self, settings: ViewSettings) -> None:
+        super().__init__()
+        self.settings = settings
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="view-settings-dialog"):
+            yield Static("View Settings", id="view-settings-title")
+            with VerticalScroll(id="view-settings-fields"):
+                yield Static("Display order")
+                yield RadioSet(
+                    RadioButton(
+                        "Newest first", value=self.settings.newest_first, id="newest-first"
+                    ),
+                    RadioButton(
+                        "Oldest first", value=not self.settings.newest_first, id="oldest-first"
+                    ),
+                    id="display-order",
+                )
+                yield Checkbox(
+                    "Show Hidden patches",
+                    value=self.settings.show_hidden,
+                    id="show-hidden",
+                    compact=True,
+                )
+                yield Checkbox(
+                    "Show Unapplied patches",
+                    value=self.settings.show_unapplied,
+                    id="show-unapplied",
+                    compact=True,
+                )
+                yield Checkbox(
+                    "Wrap lines in diff preview",
+                    value=self.settings.word_wrap,
+                    id="diff-word-wrap",
+                    compact=True,
+                )
+            with Horizontal(id="view-settings-actions"):
+                yield Button("Cancel", id="cancel-view-settings")
+                yield Button("Apply", id="apply-view-settings", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#display-order", RadioSet).focus()
+
+    @on(Button.Pressed, "#cancel-view-settings")
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#apply-view-settings")
+    def apply_settings(self) -> None:
+        newest_first = self.query_one("#newest-first", RadioButton).value
+        word_wrap = self.query_one("#diff-word-wrap", Checkbox).value
+        self.dismiss(
+            ViewSettings(
+                newest_first=newest_first,
+                word_wrap=word_wrap,
+                show_hidden=self.query_one("#show-hidden", Checkbox).value,
+                show_unapplied=self.query_one("#show-unapplied", Checkbox).value,
+            )
+        )
 
 
 class PatchMessageDialog(ModalScreen[str | None]):

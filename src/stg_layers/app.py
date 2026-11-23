@@ -19,12 +19,14 @@ from stg_layers.dialogs import (
     DiscardChangesDialog,
     MoveTargetDialog,
     PatchMessageDialog,
+    ViewSettingsDialog,
 )
 from stg_layers.diff_preview import DiffPreview
 from stg_layers.errors import RepositoryError
 from stg_layers.models import FileChange, Patch, PatchStatus, TreeItem
 from stg_layers.partial_diff import HunkLineSelection
 from stg_layers.repository import PatchChangeMoveResult, PatchMoveResult
+from stg_layers.settings import ViewSettings
 from stg_layers.tree_view import LayerTree
 from stg_layers.tree_walker import next_change_selection, walk_nodes
 
@@ -187,15 +189,16 @@ class StgLayersApp(App[None]):
     """
     BINDINGS = [
         Binding("r", "refresh_stack", "Refresh"),
-        Binding("R,shift+r", "toggle_order", "Reverse order", key_display="Shift+R"),
+        Binding("v", "view_settings", "View Settings"),
         Binding("q", "quit", "Quit"),
     ]
 
-    def __init__(self, repository: StackReader) -> None:
+    def __init__(self, repository: StackReader, *, config_path: Path | None = None) -> None:
         super().__init__()
         self.repository = repository
         self.sub_title = repository.remote_url or ""
-        self.newest_first = True
+        self._config_path = config_path
+        self._view_settings = ViewSettings.load(config_path) if config_path else ViewSettings()
         self._conflict_locked = False
         self._repository_busy = 0
         self._auto_refresh_done = asyncio.Event()
@@ -210,6 +213,10 @@ class StgLayersApp(App[None]):
             ]
             | None
         ) = None
+
+    @property
+    def newest_first(self) -> bool:
+        return self._view_settings.newest_first
 
     def _require_loaded_patches(self) -> tuple[Patch, ...]:
         """Return the loaded stack, including an empty one, or report missing data."""
@@ -264,7 +271,7 @@ class StgLayersApp(App[None]):
                 yield tree
             with Vertical(id="preview-pane"):
                 yield Static("Select a patch, file, or hunk.", id="selection-title", markup=False)
-                yield DiffPreview(id="diff-view")
+                yield DiffPreview(id="diff-view", soft_wrap=self._view_settings.word_wrap)
         yield Static("Loading StGit stack...", id="status", markup=False)
         yield Footer()
 
@@ -368,6 +375,7 @@ class StgLayersApp(App[None]):
                 staged,
                 unstaged,
                 newest_first=self.newest_first,
+                omitted_patch_statuses=self._view_settings.omitted_patch_statuses,
                 preferred_selection=preferred_selection,
                 expansion_fallback_path=expansion_fallback_path,
             )
@@ -375,7 +383,7 @@ class StgLayersApp(App[None]):
             order = "newest first" if self.newest_first else "oldest first"
             self._show_status(
                 f"Loaded {count} patch{'es' if count != 1 else ''} ({order}). "
-                "Press R to reverse order; r to refresh."
+                "Press v for View Settings or r to refresh."
             )
 
     async def _show_error(self, _error: RepositoryError) -> None:
@@ -482,14 +490,31 @@ class StgLayersApp(App[None]):
                     f"stash {retained_stash} was retained."
                 )
 
-    def action_toggle_order(self) -> None:
-        self.newest_first = not self.newest_first
-        if self._loaded_data is not None:
+    def action_view_settings(self) -> None:
+        self.push_screen(ViewSettingsDialog(self._view_settings), self._apply_view_settings)
+
+    def _apply_view_settings(self, settings: ViewSettings | None) -> None:
+        if settings is None:
+            return
+        previous = self._view_settings
+        self._view_settings = settings
+        self.query_one("#diff-view", DiffPreview).soft_wrap = settings.word_wrap
+        if self._loaded_data is not None and (
+            settings.newest_first != previous.newest_first
+            or settings.omitted_patch_statuses != previous.omitted_patch_statuses
+        ):
             self.query_one("#patch-tree", LayerTree).populate(
-                *self._loaded_data, newest_first=self.newest_first
+                *self._loaded_data,
+                newest_first=self.newest_first,
+                omitted_patch_statuses=settings.omitted_patch_statuses,
             )
             order = "newest first" if self.newest_first else "oldest first"
-            self._show_status(f"Showing {order}. Press R to reverse order; r to refresh.")
+            self._show_status(f"Showing {order}.")
+        if self._config_path is not None:
+            try:
+                settings.save(self._config_path)
+            except OSError as error:
+                self._show_status(f"Could not save View Settings: {error}")
 
     async def action_create_patch(self) -> None:
         if not await self._ensure_repository_ready():

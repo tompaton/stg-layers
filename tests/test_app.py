@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 from rich.text import Text
 from textual.containers import VerticalScroll
-from textual.widgets import Button, OptionList, Static, TextArea, Tree
+from textual.pilot import Pilot
+from textual.widgets import Button, Checkbox, OptionList, RadioButton, Static, TextArea, Tree
 from textual.widgets.text_area import Selection
 
 from stg_layers.app import StgLayersApp
@@ -18,6 +19,7 @@ from stg_layers.dialogs import (
     DiscardChangesDialog,
     MoveTargetDialog,
     PatchMessageDialog,
+    ViewSettingsDialog,
 )
 from stg_layers.errors import RepositoryError
 from stg_layers.git import Git
@@ -41,6 +43,14 @@ from stg_layers.tree_walker import walk_nodes
 def disable_periodic_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
     # Most tests trigger refresh explicitly; automatic-refresh tests opt into a short interval.
     monkeypatch.setattr(StgLayersApp, "AUTO_REFRESH_INTERVAL", 3600.0)
+
+
+async def set_display_order(pilot: Pilot[None], *, newest_first: bool = False) -> None:
+    await pilot.press("v")
+    assert isinstance(pilot.app.screen, ViewSettingsDialog)
+    await pilot.click("#newest-first" if newest_first else "#oldest-first")
+    await pilot.click("#apply-view-settings")
+    await pilot.pause()
 
 
 class FixtureRepository:
@@ -470,7 +480,7 @@ def test_preview_navigates_hunks_across_collapsed_files(reversed_order: bool) ->
             tree = app.query_one("#patch-tree", Tree)
             preview = app.query_one("#diff-view", TextArea)
             if reversed_order:
-                app.action_toggle_order()
+                await set_display_order(pilot)
                 await pilot.pause()
             hunks = [
                 node
@@ -983,7 +993,7 @@ def test_change_group_actions_move_all_files(reversed_order: bool) -> None:
             tree = app.query_one("#patch-tree", Tree)
             tree.focus()
             if reversed_order:
-                await pilot.press("shift+r")
+                await set_display_order(pilot)
                 await pilot.pause()
             older = "ctrl+up" if reversed_order else "ctrl+down"
             newer = "ctrl+down" if reversed_order else "ctrl+up"
@@ -1050,7 +1060,7 @@ def test_directory_actions_include_descendants_and_follow_selection(reversed_ord
             tree = app.query_one("#patch-tree", Tree)
             tree.focus()
             if reversed_order:
-                await pilot.press("shift+r")
+                await set_display_order(pilot)
                 await pilot.pause()
             older = "ctrl+up" if reversed_order else "ctrl+down"
             newer = "ctrl+down" if reversed_order else "ctrl+up"
@@ -1205,10 +1215,10 @@ def test_grouped_tree_preserves_state_and_file_actions() -> None:
             assert tree.cursor_node is not None and tree.cursor_node.data is not None
             assert tree.cursor_node.data.directory_path == "src/stg_layers"
             assert tree.cursor_node.is_collapsed
-            await pilot.press("shift+r")
+            await set_display_order(pilot)
             await pilot.pause()
             assert tree.cursor_node is not None and tree.cursor_node.is_collapsed
-            await pilot.press("shift+r")
+            await set_display_order(pilot, newest_first=True)
             await pilot.pause()
 
             patch_directory = tree.root.children[2].children[0].children[0]
@@ -1361,7 +1371,7 @@ def test_app_renders_patch_file_hunk_tree() -> None:
     asyncio.run(run_app())
 
 
-def test_preview_word_wrap_toggle_persists_across_hunk_navigation() -> None:
+def test_view_settings_word_wrap_persists_across_hunk_navigation() -> None:
     async def run_app() -> None:
         app = StgLayersApp(FixtureRepository())
         async with app.run_test() as pilot:
@@ -1373,6 +1383,17 @@ def test_preview_word_wrap_toggle_persists_across_hunk_navigation() -> None:
             assert not preview.soft_wrap
             text = preview.text
             await pilot.press("w")
+            assert not preview.soft_wrap
+            await pilot.press("v")
+            assert not app.screen.query_one("#diff-word-wrap", Checkbox).value
+            await pilot.click("#diff-word-wrap")
+            await pilot.press("escape")
+            assert not preview.soft_wrap
+
+            await pilot.press("v")
+            await pilot.click("#diff-word-wrap")
+            await pilot.click("#apply-view-settings")
+            await pilot.pause()
             assert preview.soft_wrap
             assert preview.text == text
             assert preview.has_focus
@@ -1380,7 +1401,11 @@ def test_preview_word_wrap_toggle_persists_across_hunk_navigation() -> None:
             await pilot.pause()
             assert preview.soft_wrap
             text = preview.text
-            await pilot.press("w")
+            await pilot.press("v")
+            assert app.screen.query_one("#diff-word-wrap", Checkbox).value
+            await pilot.click("#diff-word-wrap")
+            await pilot.click("#apply-view-settings")
+            await pilot.pause()
             assert not preview.soft_wrap
             assert preview.text == text
             assert preview.has_focus
@@ -1642,7 +1667,7 @@ def test_ctrl_shortcuts_follow_reversed_tree_direction() -> None:
         app = StgLayersApp(repository)
         async with app.run_test() as pilot:
             await pilot.pause()
-            await pilot.press("R")
+            await set_display_order(pilot)
             await pilot.pause()
 
             tree = app.query_one("#patch-tree", Tree)
@@ -1944,7 +1969,7 @@ def test_ctrl_up_down_move_selected_hunks_between_adjacent_patches() -> None:
             assert selected.patch_name == "older"
             assert repository.patch_change_moves[-1][2] is False
 
-            await pilot.press("R")
+            await set_display_order(pilot)
             await pilot.pause()
             patch_stack = tree.root.children[0]
             older_patch = next(
@@ -1989,7 +2014,7 @@ def test_ctrl_up_and_down_move_selected_patch_one_step_in_each_order() -> None:
                 ("types [notes]", False),
             ]
 
-            await pilot.press("R")
+            await set_display_order(pilot)
             await pilot.pause()
             patch_node = tree.root.children[0].children[0]
             tree.move_cursor(patch_node)
@@ -2202,7 +2227,7 @@ def test_repository_conflict_detected_before_mutating_action() -> None:
     asyncio.run(run_app())
 
 
-def test_order_toggle_reverses_sections_and_patch_sequence() -> None:
+def test_view_settings_controls_section_and_patch_order() -> None:
     class MultiplePatchRepository(FixtureRepository):
         def load_stack(self) -> tuple[Patch, ...]:
             return tuple(
@@ -2234,8 +2259,21 @@ def test_order_toggle_reverses_sections_and_patch_sequence() -> None:
                 "oldest",
             ]
 
-            await pilot.press("R")
-            await pilot.pause()
+            await pilot.press("shift+r")
+            assert app.newest_first
+            assert app.screen is app.screen_stack[0]
+
+            preview = app.query_one("#diff-view", TextArea)
+            preview.focus()
+            await pilot.press("v")
+            assert isinstance(app.screen, ViewSettingsDialog)
+            assert app.screen.query_one("#newest-first", RadioButton).value
+            await pilot.click("#oldest-first")
+            await pilot.press("escape")
+            assert app.newest_first
+            assert preview.has_focus
+
+            await set_display_order(pilot)
             assert [str(node.label) for node in tree.root.children] == [
                 "Patch stack",
                 "Staged changes",
@@ -2250,7 +2288,10 @@ def test_order_toggle_reverses_sections_and_patch_sequence() -> None:
             ]
             assert "oldest first" in str(app.query_one("#status", Static).render())
 
-            await pilot.press("shift+r")
+            await pilot.press("v")
+            assert app.screen.query_one("#oldest-first", RadioButton).value
+            await pilot.click("#newest-first")
+            await pilot.click("#apply-view-settings")
             await pilot.pause()
             assert [str(node.label) for node in tree.root.children] == [
                 "Unstaged changes",
@@ -2258,6 +2299,102 @@ def test_order_toggle_reverses_sections_and_patch_sequence() -> None:
                 "Patch stack",
             ]
             assert "newest first" in str(app.query_one("#status", Static).render())
+
+    asyncio.run(run_app())
+
+
+def test_view_settings_filters_patch_statuses_and_reports_omissions() -> None:
+    class MultiplePatchRepository(FixtureRepository):
+        def load_stack(self) -> tuple[Patch, ...]:
+            return tuple(
+                Patch(name=name, status=status, description="", files=())
+                for name, status in (
+                    ("hidden-one", PatchStatus.HIDDEN),
+                    ("applied", PatchStatus.APPLIED),
+                    ("current", PatchStatus.CURRENT),
+                    ("unapplied", PatchStatus.UNAPPLIED),
+                    ("hidden-two", PatchStatus.HIDDEN),
+                )
+            )
+
+    async def run_app() -> None:
+        app = StgLayersApp(MultiplePatchRepository())
+        async with app.run_test() as pilot:
+            tree = app.query_one("#patch-tree", Tree)
+            tree.focus()
+
+            def stack_rows() -> list[str]:
+                stack = next(
+                    node for node in tree.root.children if str(node.label) == "Patch stack"
+                )
+                return [
+                    node.data.patch_name if node.data and node.data.patch_name else str(node.label)
+                    for node in stack.children
+                ]
+
+            assert stack_rows() == ["hidden-two", "unapplied", "current", "applied", "hidden-one"]
+
+            await pilot.press("v")
+            assert app.screen.query_one("#show-hidden", Checkbox).value
+            assert app.screen.query_one("#show-unapplied", Checkbox).value
+            await pilot.click("#show-hidden")
+            await pilot.click("#apply-view-settings")
+            await pilot.pause()
+            assert stack_rows() == ["unapplied", "current", "applied", "2 Hidden patches not shown"]
+
+            await pilot.press("v")
+            assert not app.screen.query_one("#show-hidden", Checkbox).value
+            await pilot.click("#show-unapplied")
+            await pilot.click("#oldest-first")
+            await pilot.click("#apply-view-settings")
+            await pilot.pause()
+            expected = [
+                "applied",
+                "current",
+                "2 Hidden patches not shown",
+                "1 Unapplied patches not shown",
+            ]
+            assert stack_rows() == expected
+            await pilot.press("r")
+            await pilot.pause()
+            assert stack_rows() == expected
+
+            await pilot.press("v")
+            await pilot.click("#show-hidden")
+            await pilot.click("#apply-view-settings")
+            await pilot.pause()
+            assert stack_rows() == ["hidden-one", "applied", "current", "hidden-two", expected[-1]]
+
+    asyncio.run(run_app())
+
+
+def test_view_settings_are_restored_after_relaunch(tmp_path: Path) -> None:
+    config_path = tmp_path / "stg-layers" / "config.toml"
+
+    async def run_app() -> None:
+        app = StgLayersApp(FixtureRepository(), config_path=config_path)
+        async with app.run_test() as pilot:
+            await pilot.press("v")
+            await pilot.click("#oldest-first")
+            await pilot.click("#diff-word-wrap")
+            await pilot.click("#show-hidden")
+            await pilot.click("#show-unapplied")
+            await pilot.click("#apply-view-settings")
+            await pilot.pause()
+
+        app = StgLayersApp(FixtureRepository(), config_path=config_path)
+        async with app.run_test() as pilot:
+            assert not app.newest_first
+            assert app.query_one("#diff-view", TextArea).soft_wrap
+            await pilot.press("v")
+            assert app.screen.query_one("#oldest-first", RadioButton).value
+            assert app.screen.query_one("#diff-word-wrap", Checkbox).value
+            assert not app.screen.query_one("#show-hidden", Checkbox).value
+            assert not app.screen.query_one("#show-unapplied", Checkbox).value
+            saved_contents = config_path.read_bytes()
+            await pilot.click("#show-hidden")
+            await pilot.press("escape")
+            assert config_path.read_bytes() == saved_contents
 
     asyncio.run(run_app())
 
@@ -2410,7 +2547,7 @@ def test_discard_unstaged_selection_requires_confirmation(scope: str, reversed_o
             tree = app.query_one("#patch-tree", Tree)
             tree.focus()
             if reversed_order:
-                await pilot.press("shift+r")
+                await set_display_order(pilot)
             group = next(
                 node
                 for node in tree.root.children
@@ -2518,7 +2655,7 @@ def test_hunk_moves_between_current_patch_and_staged_follow_selection(
             tree = app.query_one("#patch-tree", Tree)
             tree.focus()
             if reversed_order:
-                await pilot.press("shift+r")
+                await set_display_order(pilot)
             source = next(
                 node
                 for node in walk_nodes(tree.root)
@@ -3237,7 +3374,7 @@ def test_s_moves_selected_staged_lines_into_current_patch(
             tree = app.query_one("#patch-tree", Tree)
             tree.focus()
             if reversed_order:
-                await pilot.press("shift+r")
+                await set_display_order(pilot)
             node = next(
                 node
                 for node in walk_nodes(tree.root)
@@ -3323,7 +3460,7 @@ def test_d_moves_selected_current_patch_lines_into_staged(
             tree = app.query_one("#patch-tree", Tree)
             tree.focus()
             if reversed_order:
-                await pilot.press("shift+r")
+                await set_display_order(pilot)
             node = next(
                 node
                 for node in walk_nodes(tree.root)
@@ -3435,7 +3572,7 @@ def test_preview_keys_move_selected_lines_between_patches(
             tree = app.query_one("#patch-tree", Tree)
             tree.focus()
             if reversed_order:
-                await pilot.press("shift+r")
+                await set_display_order(pilot)
             node = next(
                 node
                 for node in walk_nodes(tree.root)
@@ -3754,7 +3891,7 @@ def test_move_target_patch_order_matches_tree(
         async with app.run_test() as pilot:
             await pilot.pause()
             if reverse_order:
-                await pilot.press("R")
+                await set_display_order(pilot)
                 await pilot.pause()
             tree = app.query_one("#patch-tree", Tree)
             patch_nodes = [

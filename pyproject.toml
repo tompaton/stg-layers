@@ -5,6 +5,7 @@ description = "A Textual browser for StGit patch stacks"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "platformdirs>=4",
     "rich>=14.2.0",
     "setproctitle>=1.3.8",
     "textual>=8.2.8",
