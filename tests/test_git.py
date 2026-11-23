@@ -143,12 +143,12 @@ def test_parse_diff_reports_malformed_diff() -> None:
 @pytest.fixture
 def discard_git(tmp_path: Path) -> Git:
     git = Git(CommandRunner(tmp_path))
-    git.commands.run("git", "init", "-q")
-    git.commands.run("git", "config", "user.name", "Test")
-    git.commands.run("git", "config", "user.email", "test@example.invalid")
+    git.git.run("git", "init", "-q")
+    git.git.run("git", "config", "user.name", "Test")
+    git.git.run("git", "config", "user.email", "test@example.invalid")
     (tmp_path / "tracked.txt").write_text("".join(f"line {i}\n" for i in range(100)))
     git.stage_files(("tracked.txt",))
-    git.commands.run("git", "commit", "-qm", "base")
+    git.git.run("git", "commit", "-qm", "base")
     return git
 
 
@@ -207,7 +207,7 @@ def test_discard_hunk_keeps_unstaged_mode_change(discard_git: Git) -> None:
     git = discard_git
     path = git.root / "tracked.txt"
     original = path.read_text()
-    git.commands.run("git", "config", "core.filemode", "true")
+    git.git.run("git", "config", "core.filemode", "true")
     path.chmod(0o755)
     path.write_text(original.replace("line 5\n", "changed\n"))
     (file,) = git.load_unstaged_changes()
@@ -242,9 +242,9 @@ def test_remote_url_prefers_origin(
     tmp_path: Path, remotes: tuple[str, ...], expected: str | None
 ) -> None:
     git = Git(CommandRunner(tmp_path))
-    git.commands.run("git", "init", "-q")
+    git.git.run("git", "init", "-q")
     for remote in remotes:
-        git.commands.run("git", "remote", "add", remote, f"https://example.com/{remote}.git")
+        git.git.run("git", "remote", "add", remote, f"https://example.com/{remote}.git")
     assert git.remote_url() == expected
 
 
@@ -289,8 +289,8 @@ def test_move_selected_lines_preserves_other_changes(
         if stage
         else full.replace(new, unstaged_versions[part])
     )
-    assert git.commands.run("git", "show", f":{path.name}") == expected
-    assert git.commands.run("git", "show", ":unrelated.txt") == "keep staged\n"
+    assert git.git.run("git", "show", f":{path.name}") == expected
+    assert git.git.run("git", "show", ":unrelated.txt") == "keep staged\n"
     assert path.read_text() == worktree
 
 
@@ -305,9 +305,7 @@ def test_move_selected_lines_in_added_file(discard_git: Git, stage: bool) -> Non
     files = git.load_unstaged_changes() if stage else git.load_staged_changes()
     file = next(file for file in files if file.path == path.name)
     git.move_selected_lines(_select_lines(file, "+two"), stage=stage)
-    assert git.commands.run("git", "show", f":{path.name}") == (
-        "two\n" if stage else "one\nthree\n"
-    )
+    assert git.git.run("git", "show", f":{path.name}") == ("two\n" if stage else "one\nthree\n")
     assert path.read_text() == text
 
 
@@ -322,7 +320,7 @@ def test_move_selected_lines_in_deleted_file(discard_git: Git, stage: bool) -> N
     files = git.load_unstaged_changes() if stage else git.load_staged_changes()
     (file,) = files
     git.move_selected_lines(_select_lines(file, "-line 10"), stage=stage)
-    assert git.commands.run("git", "show", f":{path.name}") == (
+    assert git.git.run("git", "show", f":{path.name}") == (
         base.replace("line 10\n", "") if stage else "line 10\n"
     )
     assert not path.exists()
@@ -334,13 +332,13 @@ def test_move_selected_lines_without_final_newline(discard_git: Git, stage: bool
     path = git.root / "tracked.txt"
     path.write_text("before")
     git.stage_files((path.name,))
-    git.commands.run("git", "commit", "-qm", "no final newline")
+    git.git.run("git", "commit", "-qm", "no final newline")
     path.write_text("after")
     if not stage:
         git.stage_files((path.name,))
     (file,) = git.load_unstaged_changes() if stage else git.load_staged_changes()
     git.move_selected_lines(_select_lines(file, "-before", "+after"), stage=stage)
-    assert git.commands.run("git", "show", f":{path.name}") == ("after" if stage else "before")
+    assert git.git.run("git", "show", f":{path.name}") == ("after" if stage else "before")
     assert path.read_text() == "after"
 
 
@@ -351,7 +349,7 @@ def test_selected_lines_reject_stale_or_unchanged_selections(discard_git: Git) -
     path.write_text(base.replace("line 10\n", "changed\n"))
     (file,) = git.load_unstaged_changes()
     hunk = file.hunks[0]
-    index = git.commands.run("git", "write-tree")
+    index = git.index_tree()
     for row in (0, 1):
         selection = HunkLineSelection(file.path, hunk.diff_text, row, row)
         with pytest.raises(RepositoryError, match="Select added or removed"):
@@ -360,7 +358,7 @@ def test_selected_lines_reject_stale_or_unchanged_selections(discard_git: Git) -
     path.write_text(base.replace("line 10\n", "newer change\n"))
     with pytest.raises(RepositoryError, match="no longer present"):
         git.move_selected_lines(selection, stage=True)
-    assert git.commands.run("git", "write-tree") == index
+    assert git.index_tree() == index
 
 
 @pytest.mark.parametrize("stage", [False, True])
@@ -372,14 +370,14 @@ def test_move_single_line_at_missing_final_newline(
     path = git.root / "tracked.txt"
     path.write_text("before")
     git.stage_files((path.name,))
-    git.commands.run("git", "commit", "-qm", "no final newline")
+    git.git.run("git", "commit", "-qm", "no final newline")
     path.write_text("after")
     if not stage:
         git.stage_files((path.name,))
     (file,) = git.load_unstaged_changes() if stage else git.load_staged_changes()
     git.move_selected_lines(_select_lines(file, "+after" if addition else "-before"), stage=stage)
     expected = "before\nafter" if stage == addition else ""
-    assert git.commands.run("git", "show", f":{path.name}") == expected
+    assert git.git.run("git", "show", f":{path.name}") == expected
     assert path.read_text() == "after"
 
 
@@ -420,7 +418,7 @@ def test_selected_lines_preserve_staged_rename(discard_git: Git, stage: bool) ->
         git.stage_files((path.name,))
     (file,) = git.load_unstaged_changes() if stage else git.load_staged_changes()
     git.move_selected_lines(_select_lines(file, "-line 10", "+changed"), stage=stage)
-    assert git.commands.run("git", "show", f":{path.name}") == (changed if stage else base)
+    assert git.git.run("git", "show", f":{path.name}") == (changed if stage else base)
     assert not git.is_tracked(old.name)
     assert path.read_text() == changed
 
@@ -429,15 +427,15 @@ def test_selected_lines_preserve_staged_rename(discard_git: Git, stage: bool) ->
 def test_selected_lines_leave_file_mode_unchanged_in_index(discard_git: Git, stage: bool) -> None:
     git = discard_git
     path = git.root / "tracked.txt"
-    git.commands.run("git", "config", "core.filemode", "true")
+    git.git.run("git", "config", "core.filemode", "true")
     path.chmod(0o755)
     path.write_text(path.read_text().replace("line 10\n", "changed\n"))
     if not stage:
         git.stage_files((path.name,))
-    mode = git.commands.run("git", "ls-files", "--stage").split()[0]
+    mode = git.git.run("git", "ls-files", "--stage").split()[0]
     (file,) = git.load_unstaged_changes() if stage else git.load_staged_changes()
     git.move_selected_lines(_select_lines(file, "-line 10", "+changed"), stage=stage)
-    assert git.commands.run("git", "ls-files", "--stage").split()[0] == mode
+    assert git.git.run("git", "ls-files", "--stage").split()[0] == mode
     assert path.stat().st_mode & 0o111
 
 
@@ -451,7 +449,7 @@ def test_discard_selected_lines_preserves_index_and_other_worktree_changes(
     staged = path.read_text().replace("line 30\n", "staged\n")
     path.write_text(staged)
     git.stage_files((path.name,))
-    index = git.commands.run("git", "write-tree")
+    index = git.index_tree()
     worktree = staged.replace("line 10\n", "first 10\nsecond 10\n").replace(
         "line 70\n", "first 70\nsecond 70\n"
     )
@@ -465,7 +463,7 @@ def test_discard_selected_lines_preserves_index_and_other_worktree_changes(
     old = f"line {target}\n"
     replacement = {"addition": "", "deletion": old + new, "replacement": old}[part]
     assert path.read_text() == worktree.replace(new, replacement)
-    assert git.commands.run("git", "write-tree") == index
+    assert git.index_tree() == index
     assert path.stat().st_mode & 0o111
 
 
@@ -481,7 +479,7 @@ def test_discard_lines_in_added_or_deleted_file(
         path.write_text(original)
     else:
         path.unlink()
-    index = git.commands.run("git", "write-tree")
+    index = git.index_tree()
     (file,) = git.load_unstaged_changes()
     hunk = file.hunks[0]
     selection = (
@@ -497,7 +495,7 @@ def test_discard_lines_in_added_or_deleted_file(
             original if all_lines else original.replace("two\n", "") if addition else "line 10\n"
         )
         assert path.read_text() == expected
-    assert git.commands.run("git", "write-tree") == index
+    assert git.index_tree() == index
 
 
 def test_discard_lines_rejects_stale_selection(discard_git: Git) -> None:
@@ -509,11 +507,11 @@ def test_discard_lines_rejects_stale_selection(discard_git: Git) -> None:
     selection = _select_lines(file, "+changed")
     newer = base.replace("line 10\n", "newer\n")
     path.write_text(newer)
-    index = git.commands.run("git", "write-tree")
+    index = git.index_tree()
     with pytest.raises(RepositoryError, match="no longer present"):
         git.discard_selected_lines(selection)
     assert path.read_text() == newer
-    assert git.commands.run("git", "write-tree") == index
+    assert git.index_tree() == index
 
 
 @pytest.mark.parametrize("addition", [False, True])
@@ -522,13 +520,13 @@ def test_discard_selected_line_without_final_newline(discard_git: Git, addition:
     path = git.root / "tracked.txt"
     path.write_text("before")
     git.stage_files((path.name,))
-    git.commands.run("git", "commit", "-qm", "no final newline")
+    git.git.run("git", "commit", "-qm", "no final newline")
     path.write_text("after")
     (file,) = git.load_unstaged_changes()
-    index = git.commands.run("git", "write-tree")
+    index = git.index_tree()
     git.discard_selected_lines(_select_lines(file, "+after" if addition else "-before"))
     assert path.read_text() == ("" if addition else "before\nafter")
-    assert git.commands.run("git", "write-tree") == index
+    assert git.index_tree() == index
 
 
 def test_unstaged_diffstat_matches_git_and_preserves_index(discard_git: Git) -> None:
@@ -538,11 +536,11 @@ def test_unstaged_diffstat_matches_git_and_preserves_index(discard_git: Git) -> 
     path.write_text(staged)
     git.stage_files((path.name,))
     path.write_text(staged.replace("line 10\n", "unstaged\n"))
-    git.commands.run("git", "config", "color.ui", "always")
-    index = git.commands.run("git", "write-tree")
-    expected = git.commands.run("git", "diff", "--stat", "--no-color", "--", path.name).rstrip()
+    git.git.run("git", "config", "color.ui", "always")
+    index = git.index_tree()
+    expected = git.git.run("git", "diff", "--stat", "--no-color", "--", path.name).rstrip()
     assert git.unstaged_diffstat((path.name,)).split() == expected.split()
-    assert git.commands.run("git", "write-tree") == index
+    assert git.index_tree() == index
     assert path.read_text() == staged.replace("line 10\n", "unstaged\n")
 
 
@@ -553,13 +551,13 @@ def test_unstaged_diffstat_includes_only_selected_untracked_and_binary_files(
     (git.root / "new [file].txt").write_text("one\ntwo\n")
     (git.root / "binary.dat").write_bytes(b"\0binary\xff")
     (git.root / "outside.txt").write_text("not selected\n")
-    git.commands.run("git", "config", "color.ui", "always")
-    index = git.commands.run("git", "write-tree")
+    git.git.run("git", "config", "color.ui", "always")
+    index = git.index_tree()
     stat = git.unstaged_diffstat(("new [file].txt", "binary.dat"))
     assert "new [file].txt" in stat and "binary.dat" in stat
     assert "2 files changed" in stat and "2 insertions(+)" in stat
     assert "Bin" in stat and "outside.txt" not in stat
-    assert git.commands.run("git", "write-tree") == index
+    assert git.index_tree() == index
     assert (git.root / "binary.dat").read_bytes() == b"\0binary\xff"
 
 
@@ -575,3 +573,58 @@ def test_hunk_and_line_diffstats_only_include_selected_changes(discard_git: Git)
     line_stat = git.discarded_lines_diffstat(_select_lines(file, "+first"))
     assert "1 insertion(+)" in line_stat and "deletion" not in line_stat
     assert "2 insertions" in git.unstaged_diffstat((path.name,))
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_diff_operations_ignore_external_diff_and_text_conversion(
+    discard_git: Git, cached: bool
+) -> None:
+    git = discard_git
+    path = git.root / "tracked.txt"
+    path.write_text(path.read_text().replace("line 10\n", "changed\n"))
+    if cached:
+        git.stage_files((path.name,))
+    (git.root / ".git/info/attributes").write_text("tracked.txt diff=forbidden\n")
+    git.git.run("git", "config", "diff.external", "false")
+    git.git.run("git", "config", "diff.forbidden.textconv", "false")
+    git.git.run("git", "config", "color.ui", "always")
+    index = git.index_tree()
+
+    files = git.load_staged_changes() if cached else git.load_unstaged_changes()
+    (file,) = files
+    assert "+changed" in file.diff_text
+    assert "\x1b" not in file.diff_text
+    diff = git.local_file_diff(file, staged=cached)
+    assert "+changed" in diff and "\x1b" not in diff
+    assert "1 insertion(+)" in git.diffstat(diff)
+    if cached:
+        assert git.staged_path_groups() == ((path.name,),)
+        assert "+changed" in git.staged_file_diff(path.name)
+    else:
+        assert "1 insertion(+)" in git.unstaged_diffstat((path.name,))
+    assert git.index_tree() == index
+    assert "changed\n" in path.read_text()
+
+
+def test_file_commands_treat_pathspec_characters_literally(discard_git: Git) -> None:
+    git = discard_git
+    names = ("[ab].txt", "a.txt", "b.txt")
+    for name in names:
+        (git.root / name).write_text("before\n")
+    git.stage_files(names)
+    git.git.run("git", "commit", "-qm", "files with pathspec characters")
+    for name in names:
+        (git.root / name).write_text("after\n")
+
+    git.stage_files((names[0],))
+    assert {file.path for file in git.load_staged_changes()} == {names[0]}
+    assert {file.path for file in parse_diff("literal", git.staged_file_diff(names[0]))} == {
+        names[0]
+    }
+    git.stage_files(("a.txt",))
+    git.unstage_files((names[0],))
+    assert {file.path for file in git.load_staged_changes()} == {"a.txt"}
+    git.discard_files((names[0],))
+    assert (git.root / names[0]).read_text() == "before\n"
+    assert (git.root / "a.txt").read_text() == "after\n"
+    assert (git.root / "b.txt").read_text() == "after\n"

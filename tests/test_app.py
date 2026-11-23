@@ -32,6 +32,7 @@ from stg_layers.models import (
 )
 from stg_layers.partial_diff import HunkLineSelection
 from stg_layers.repository import PatchChangeMoveResult, PatchMoveResult, StGitRepository
+from stg_layers.stg_commands import StgCommands
 from stg_layers.tree_builder import TreeBuilder
 from stg_layers.tree_walker import walk_nodes
 
@@ -2731,15 +2732,16 @@ def test_auto_refresh_error_keeps_tree_and_retries() -> None:
 
 
 def test_refresh_detects_external_git_and_worktree_changes(tmp_path: Path) -> None:
-    git = Git(CommandRunner(tmp_path))
-    git.commands.run("git", "init", "-q")
-    git.commands.run("git", "config", "user.name", "Test")
-    git.commands.run("git", "config", "user.email", "test@example.invalid")
+    commands = CommandRunner(tmp_path)
+    git = Git(commands)
+    git.git.run("git", "init", "-q")
+    git.git.run("git", "config", "user.name", "Test")
+    git.git.run("git", "config", "user.email", "test@example.invalid")
     path = tmp_path / "file.txt"
     path.write_text("before\n")
     git.stage_files((path.name,))
-    git.commands.run("git", "commit", "-qm", "base")
-    git.commands.run("stg", "init")
+    git.git.run("git", "commit", "-qm", "base")
+    commands.run("stg", "init")
     path.write_text("dirty one\n")
 
     async def run_app() -> None:
@@ -2759,19 +2761,20 @@ def test_refresh_detects_external_git_and_worktree_changes(tmp_path: Path) -> No
             await app._refresh_changed_repository()
             assert app._loaded_data is not None
             assert len(app._loaded_data[1]) == 1 and not app._loaded_data[2]
-            git.commands.run("git", "checkout", "-b", "switched")
-            git.commands.run("stg", "init")
-            git.commands.run("git", "remote", "add", "origin", "git@example.com:repo.git")
+            git.git.run("git", "checkout", "-b", "switched")
+            commands.run("stg", "init")
+            git.git.run("git", "remote", "add", "origin", "git@example.com:repo.git")
             await app._refresh_changed_repository()
             assert "[switched]" in str(tree.root.label)
             assert app.sub_title == "git@example.com:repo.git"
-            git.commands.run("stg", "new", "-m", "External patch", "external")
-            git.commands.run("stg", "refresh", "--index")
+            stg = StgCommands(commands)
+            commands.run("stg", "new", "-m", "External patch", "external")
+            stg.refresh(index=True)
             await app._refresh_changed_repository()
             assert app._loaded_data is not None
             assert app._loaded_data[0][0].name == "external"
             assert app._loaded_data[1] == ()
-            git.commands.run("stg", "pop")
+            stg.pop("external")
             await app._refresh_changed_repository()
             assert app._loaded_data is not None
             assert app._loaded_data[0][0].status == PatchStatus.UNAPPLIED
@@ -2926,18 +2929,19 @@ def test_diff_preview_always_selects_current_line(soft_wrap: bool) -> None:
 
 @pytest.fixture
 def line_repository(tmp_path: Path) -> StGitRepository:
-    git = Git(CommandRunner(tmp_path))
-    git.commands.run("git", "init", "-q")
-    git.commands.run("git", "config", "user.name", "Test")
-    git.commands.run("git", "config", "user.email", "test@example.invalid")
+    commands = CommandRunner(tmp_path)
+    git = Git(commands)
+    git.git.run("git", "init", "-q")
+    git.git.run("git", "config", "user.name", "Test")
+    git.git.run("git", "config", "user.email", "test@example.invalid")
     (tmp_path / "src").mkdir()
     path = tmp_path / "src/tracked.txt"
     base = "".join(f"line {i}\n" for i in range(100))
     path.write_text(base)
     (tmp_path / "other.txt").write_text("other\n")
     git.stage_files(("src/tracked.txt", "other.txt"))
-    git.commands.run("git", "commit", "-qm", "base")
-    git.commands.run("stg", "init")
+    git.git.run("git", "commit", "-qm", "base")
+    commands.run("stg", "init")
     path.write_text(
         base.replace("line 10\nline 11\n", "new 10\nnew 11\n").replace("line 70\n", "new 70\n")
     )
@@ -2954,10 +2958,10 @@ def test_preview_keys_move_selected_lines_only(
     git = repository.git
     path = repository.root / "src/tracked.txt"
     worktree = path.read_text()
-    base = git.commands.run("git", "show", "HEAD:src/tracked.txt")
+    base = git.git.run("git", "show", "HEAD:src/tracked.txt")
     if not stage:
         git.stage_files(("src/tracked.txt", "other.txt"))
-    other_index = git.commands.run("git", "show", ":other.txt")
+    other_index = git.git.run("git", "show", ":other.txt")
 
     async def run_app() -> None:
         app = StgLayersApp(repository)
@@ -2990,17 +2994,17 @@ def test_preview_keys_move_selected_lines_only(
             preview = app.query_one("#diff-view", TextArea)
             if scope in {"group", "directory"}:
                 preview.focus()
-                index = git.commands.run("git", "write-tree")
+                index = git.index_tree()
                 await pilot.press("s", "d")
-                assert git.commands.run("git", "write-tree") == index
+                assert git.index_tree() == index
                 return
             row = preview.text.splitlines().index("+new 10")
             preview.focus()
             preview.move_cursor((row, 0))
-            index = git.commands.run("git", "write-tree")
+            index = git.index_tree()
             if stage:
                 await pilot.press("d")
-                assert git.commands.run("git", "write-tree") == index
+                assert git.index_tree() == index
                 assert isinstance(app.screen, DiscardChangesDialog)
                 await pilot.press("escape")
             await pilot.press("s" if stage else "d")
@@ -3010,8 +3014,8 @@ def test_preview_keys_move_selected_lines_only(
                 if stage
                 else worktree.replace("new 10\n", "")
             )
-            assert git.commands.run("git", "show", ":src/tracked.txt") == expected
-            assert git.commands.run("git", "show", ":other.txt") == other_index
+            assert git.git.run("git", "show", ":src/tracked.txt") == expected
+            assert git.git.run("git", "show", ":other.txt") == other_index
             assert path.read_text() == worktree
             assert preview.has_focus
 
@@ -3043,23 +3047,23 @@ def test_preview_line_selection_rejects_multiple_hunks_and_supports_reverse_sele
             first = lines.index("+new 10")
             second = lines.index("+new 70")
             preview.selection = Selection((first, 0), (second, 0))
-            index = git.commands.run("git", "write-tree")
+            index = git.index_tree()
             await pilot.press("s")
             assert "single diff hunk" in str(app.query_one("#status", Static).render())
-            assert git.commands.run("git", "write-tree") == index
+            assert git.index_tree() == index
             await pilot.press("d")
             assert not isinstance(app.screen, DiscardChangesDialog)
-            assert git.commands.run("git", "write-tree") == index
+            assert git.index_tree() == index
             preview.move_cursor(
                 (next(i for i, line in enumerate(lines) if line.startswith("@@")), 0)
             )
             await pilot.press("d")
             assert not isinstance(app.screen, DiscardChangesDialog)
             assert "Select added or removed" in str(app.query_one("#status", Static).render())
-            assert git.commands.run("git", "write-tree") == index
+            assert git.index_tree() == index
             preview.selection = Selection((first + 1, 0), (first, 0))
             await pilot.press("s")
-            staged = git.commands.run("git", "show", ":src/tracked.txt")
+            staged = git.git.run("git", "show", ":src/tracked.txt")
             assert "line 10\nline 11\nnew 10\nnew 11\n" in staged
             assert "new 70" not in staged
 
@@ -3075,11 +3079,11 @@ def test_preview_discard_selected_lines_confirms_and_preserves_staged_changes(
     git = repository.git
     path = repository.root / "src/tracked.txt"
     worktree = path.read_text().replace("line 30\n", "staged 30\n")
-    base = git.commands.run("git", "show", "HEAD:src/tracked.txt")
+    base = git.git.run("git", "show", "HEAD:src/tracked.txt")
     path.write_text(base.replace("line 30\n", "staged 30\n"))
     git.stage_files(("src/tracked.txt",))
     path.write_text(worktree)
-    index = git.commands.run("git", "write-tree")
+    index = git.index_tree()
 
     async def run_app() -> None:
         app = StgLayersApp(repository)
@@ -3114,7 +3118,7 @@ def test_preview_discard_selected_lines_confirms_and_preserves_staged_changes(
                 else:
                     await pilot.click("#cancel-delete")
                 assert path.read_text() == worktree
-                assert git.commands.run("git", "write-tree") == index
+                assert git.index_tree() == index
             await pilot.press(key)
             summary = app.screen.query_one("#delete-stat", VerticalScroll).query_one(Static)
             assert "1 insertion(+)" in str(summary.render())
@@ -3124,7 +3128,7 @@ def test_preview_discard_selected_lines_confirms_and_preserves_staged_changes(
             await pilot.click("#confirm-delete")
             await pilot.pause()
             assert path.read_text() == worktree.replace("new 10\n", "")
-            assert git.commands.run("git", "write-tree") == index
+            assert git.index_tree() == index
             assert preview.has_focus
 
     asyncio.run(run_app())
@@ -3157,11 +3161,11 @@ def test_preview_discard_selected_lines_rechecks_after_confirmation(
             assert isinstance(app.screen, DiscardChangesDialog)
             newer = path.read_text().replace("new 10\n", "newer 10\n")
             path.write_text(newer)
-            index = git.commands.run("git", "write-tree")
+            index = git.index_tree()
             await pilot.click("#confirm-delete")
             await pilot.pause()
             assert path.read_text() == newer
-            assert git.commands.run("git", "write-tree") == index
+            assert git.index_tree() == index
             assert "no longer present" in str(app.query_one("#status", Static).render())
 
     asyncio.run(run_app())
@@ -3218,10 +3222,10 @@ def test_s_moves_selected_staged_lines_into_current_patch(
 ) -> None:
     repository = line_repository
     git = repository.git
-    git.commands.run("stg", "new", "-m", "Current patch", "current")
-    base = git.commands.run("git", "show", "HEAD:src/tracked.txt")
+    repository.commands.run("stg", "new", "-m", "Current patch", "current")
+    base = git.git.run("git", "show", "HEAD:src/tracked.txt")
     git.stage_files(("src/tracked.txt", "other.txt"))
-    index = git.commands.run("git", "write-tree")
+    index = git.index_tree()
     path = repository.root / "src/tracked.txt"
     worktree = path.read_text().replace("line 50\n", "unstaged 50\n")
     path.write_text(worktree)
@@ -3253,9 +3257,9 @@ def test_s_moves_selected_staged_lines_into_current_patch(
             await pilot.press("s")
             await pilot.pause()
             expected = base.replace("line 11\n", "line 11\nnew 10\n")
-            assert git.commands.run("git", "show", "HEAD:src/tracked.txt") == expected
-            assert git.commands.run("git", "show", "HEAD:other.txt") == "other\n"
-            assert git.commands.run("git", "write-tree") == index
+            assert git.git.run("git", "show", "HEAD:src/tracked.txt") == expected
+            assert git.git.run("git", "show", "HEAD:other.txt") == "other\n"
+            assert git.index_tree() == index
             assert path.read_text() == worktree
             assert preview.has_focus
             assert tree.cursor_node is not None and tree.cursor_node.data is not None
@@ -3268,7 +3272,7 @@ def test_s_on_staged_lines_requires_current_patch(line_repository: StGitReposito
     repository = line_repository
     git = repository.git
     git.stage_files(("src/tracked.txt",))
-    index = git.commands.run("git", "write-tree")
+    index = git.index_tree()
 
     async def run_app() -> None:
         app = StgLayersApp(repository)
@@ -3287,7 +3291,7 @@ def test_s_on_staged_lines_requires_current_patch(line_repository: StGitReposito
             preview.focus()
             preview.move_cursor((preview.text.splitlines().index("+new 10"), 0))
             await pilot.press("s")
-            assert git.commands.run("git", "write-tree") == index
+            assert git.index_tree() == index
             assert "no current patch" in str(app.query_one("#status", Static).render())
 
     asyncio.run(run_app())
@@ -3300,15 +3304,15 @@ def test_d_moves_selected_current_patch_lines_into_staged(
 ) -> None:
     repository = line_repository
     git = repository.git
-    git.commands.run("stg", "new", "-m", "Current patch", "current")
+    repository.commands.run("stg", "new", "-m", "Current patch", "current")
     git.stage_files(("src/tracked.txt", "other.txt"))
     repository.stg.refresh()
-    patched = git.commands.run("git", "show", "HEAD:src/tracked.txt")
+    patched = git.git.run("git", "show", "HEAD:src/tracked.txt")
     path = repository.root / "src/tracked.txt"
     path.write_text(patched.replace("line 30\n", "staged 30\n"))
     (repository.root / "other.txt").write_text("other staged again\n")
     git.stage_files(("src/tracked.txt", "other.txt"))
-    index = git.commands.run("git", "write-tree")
+    index = git.index_tree()
     worktree = path.read_text().replace("line 50\n", "unstaged 50\n")
     path.write_text(worktree)
 
@@ -3342,12 +3346,12 @@ def test_d_moves_selected_current_patch_lines_into_staged(
             await pilot.press("d")
             await pilot.pause()
             assert not isinstance(app.screen, DiscardChangesDialog)
-            assert git.commands.run("git", "show", "HEAD:src/tracked.txt") == patched.replace(
+            assert git.git.run("git", "show", "HEAD:src/tracked.txt") == patched.replace(
                 "new 10\n", ""
             )
-            assert git.commands.run("git", "write-tree") == index
+            assert git.index_tree() == index
             assert path.read_text() == worktree
-            assert git.commands.run("git", "show", "HEAD:other.txt") == "other changed\n"
+            assert git.git.run("git", "show", "HEAD:other.txt") == "other changed\n"
             assert (repository.root / "other.txt").read_text() == "other staged again\n"
             file = next(
                 file for file in repository.load_staged_changes() if file.path == "src/tracked.txt"
@@ -3418,8 +3422,8 @@ def test_preview_keys_move_selected_lines_between_patches(
     path = repository.root / "src/tracked.txt"
     path.write_text(path.read_text().replace("line 30\n", "staged 30\n"))
     git.stage_files(("src/tracked.txt",))
-    index = git.commands.run("git", "write-tree")
-    tree_before = git.commands.run("git", "rev-parse", "HEAD^{tree}")
+    index = git.index_tree()
+    tree_before = git.git.rev_parse("HEAD^{tree}")
     worktree = path.read_text().replace("line 50\n", "unstaged 50\n")
     path.write_text(worktree)
     (repository.root / "untracked.txt").write_text("untracked\n")
@@ -3453,8 +3457,8 @@ def test_preview_keys_move_selected_lines_between_patches(
             preview.move_cursor((preview.text.splitlines().index("+new 10"), 0))
             await pilot.press("d" if toward_newer else "s")
             await pilot.pause()
-            assert git.commands.run("git", "rev-parse", "HEAD^{tree}") == tree_before
-            assert git.commands.run("git", "write-tree") == index
+            assert git.git.rev_parse("HEAD^{tree}") == tree_before
+            assert git.index_tree() == index
             assert path.read_text() == worktree
             patches = repository.load_stack()
             assert (
@@ -3481,10 +3485,11 @@ def test_preview_delete_discards_lines_from_staged_or_patch(
     line_repository: StGitRepository, source: str
 ) -> None:
     repository = line_repository
+    stg_commands = StgCommands(repository.commands)
     repository.git.stage_files(("src/tracked.txt",))
     if source == "patch":
         repository.commands.run("stg", "new", "-m", "Current", "current")
-        repository.commands.run("stg", "refresh", "--index")
+        stg_commands.refresh(index=True)
     path = repository.root / "src/tracked.txt"
     before = path.read_text()
 
@@ -3603,12 +3608,13 @@ def test_move_whole_patch_opens_combined_message_before_squashing(
     line_repository: StGitRepository,
 ) -> None:
     repository = line_repository
+    stg_commands = StgCommands(repository.commands)
     repository.commands.run("stg", "new", "-m", "First message", "first")
     repository.git.stage_files(("src/tracked.txt",))
-    repository.commands.run("stg", "refresh", "--index")
+    stg_commands.refresh(index=True)
     repository.commands.run("stg", "new", "-m", "Second message", "second")
     repository.git.stage_files(("other.txt",))
-    repository.commands.run("stg", "refresh", "--index")
+    stg_commands.refresh(index=True)
 
     async def run_app() -> None:
         app = StgLayersApp(repository)
@@ -3662,10 +3668,11 @@ def test_preview_move_target_always_moves_selected_lines(
     line_repository: StGitRepository, scope: str, target_patch: bool
 ) -> None:
     repository = line_repository
+    stg_commands = StgCommands(repository.commands)
     commands = repository.commands
     commands.run("stg", "new", "-m", "Source message", "source")
     repository.git.stage_files(("src/tracked.txt",))
-    commands.run("stg", "refresh", "--index")
+    stg_commands.refresh(index=True)
     commands.run("stg", "new", "-m", "Middle", "middle")
     commands.run("stg", "new", "-m", "Target message", "target")
     before = (repository.root / "src/tracked.txt").read_bytes()
@@ -3734,12 +3741,13 @@ def test_move_target_patch_order_matches_tree(
     line_repository: StGitRepository, reverse_order: bool, source_name: str
 ) -> None:
     repository = line_repository
+    stg_commands = StgCommands(repository.commands)
     repository.git.stash()
     for name in ("first", "second", "third", "fourth", "fifth"):
         repository.commands.run("stg", "new", "-m", name, name)
-    repository.commands.run("stg", "pop", "fifth")
-    repository.commands.run("stg", "hide", "fifth")
-    repository.commands.run("stg", "pop", "fourth")
+    stg_commands.pop("fifth")
+    stg_commands.hide("fifth")
+    stg_commands.pop("fourth")
 
     async def run_app() -> None:
         app = StgLayersApp(repository)
