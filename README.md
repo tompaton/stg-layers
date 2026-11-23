@@ -5,7 +5,7 @@ preview. Stage, unstage, discard, and move files, hunks, or selected lines betwe
 
 ## Requirements
 
-- Python 3.15 or newer
+- Python 3.14 or newer
 - Git
 - StGit (`stg`)
 
