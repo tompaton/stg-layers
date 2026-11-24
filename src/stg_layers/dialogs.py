@@ -66,6 +66,12 @@ class ViewSettingsDialog(ModalScreen[ViewSettings | None]):
                     id="diff-word-wrap",
                     compact=True,
                 )
+                yield Checkbox(
+                    "Show diff preview line numbers",
+                    value=self.settings.show_diff_line_numbers,
+                    id="show-diff-line-numbers",
+                    compact=True,
+                )
             with Horizontal(id="view-settings-actions"):
                 yield Button("Cancel", id="cancel-view-settings")
                 yield Button("Apply", id="apply-view-settings", variant="primary")
@@ -87,6 +93,7 @@ class ViewSettingsDialog(ModalScreen[ViewSettings | None]):
                 word_wrap=word_wrap,
                 show_hidden=self.query_one("#show-hidden", Checkbox).value,
                 show_unapplied=self.query_one("#show-unapplied", Checkbox).value,
+                show_diff_line_numbers=self.query_one("#show-diff-line-numbers", Checkbox).value,
             )
         )
 

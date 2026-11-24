@@ -55,6 +55,7 @@ choices, or press **Escape** or select **Cancel** to keep the current settings.
 | **Show Hidden patches** | On | Shows hidden patches in the tree. |
 | **Show Unapplied patches** | On | Shows unapplied patches in the tree. |
 | **Wrap lines in diff preview** | Off | Wraps long lines to fit the diff pane. |
+| **Show diff preview line numbers** | On | Shows the old and new file line numbers in the diff gutter. |
 
 When a filter omits patches, the end of the patch stack shows the count for that
 status, for example, `2 Hidden patches not shown` or
@@ -138,6 +139,10 @@ These commands apply when the **tree** is focused.
 | **Delete** | Patch | Open an **OK/Cancel** confirmation before deleting it. |
 
 ### Diff preview
+
+The gutter shows old-file and new-file line numbers from each hunk, in that
+order. Additions only have a new number, and removals only have an old number.
+Headers and wrapped continuations have blank gutters.
 
 These commands apply when the **diff preview** is focused.
 For patch transfers, **s** moves toward older patches and **d** toward newer

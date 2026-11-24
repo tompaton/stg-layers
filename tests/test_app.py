@@ -1349,7 +1349,7 @@ def test_app_renders_patch_file_hunk_tree() -> None:
             assert "hunk 1" in str(app.query_one("#selection-title", Static).render())
             assert "+after" in preview.text
             assert preview.read_only
-            assert not preview.show_line_numbers
+            assert preview.show_line_numbers
             assert [str(preview.get_line(row).spans[0].style) for row in range(3)] == [
                 "#c678dd",
                 "#e06c75",
@@ -1409,6 +1409,66 @@ def test_view_settings_word_wrap_persists_across_hunk_navigation() -> None:
             assert not preview.soft_wrap
             assert preview.text == text
             assert preview.has_focus
+
+    asyncio.run(run_app())
+
+
+def test_diff_preview_gutter_uses_old_and_new_hunk_line_numbers() -> None:
+    async def run_app() -> None:
+        app = StgLayersApp(FixtureRepository())
+        async with app.run_test() as pilot:
+            preview = app.query_one("#diff-view", TextArea)
+            diff = (
+                "--- a/file\n"
+                "+++ b/file\n"
+                "@@ -97,2 +1001,3 @@\n"
+                " context " + "long line " * 10 + "\n"
+                "-removed\n"
+                "+added\n"
+                "+new last line\n"
+                "\\ No newline at end of file\n"
+                "@@ -200 +5000 @@\n"
+                " next hunk\n"
+                "@@ -0,0 +1 @@\n"
+                "+new file\n"
+                "@@ -401 +0,0 @@\n"
+                "-deleted file\n"
+            )
+            preview.load_text(diff)
+            await pilot.pause()
+            gutters = [
+                preview.render_line(row).text[: preview.gutter_width]
+                for row in range(preview.document.line_count)
+            ]
+            assert gutters == [
+                "           ",
+                "           ",
+                "           ",
+                "  97 1001  ",
+                "  98       ",
+                "     1002  ",
+                "     1003  ",
+                "           ",
+                "           ",
+                " 200 5000  ",
+                "           ",
+                "        1  ",
+                "           ",
+                " 401       ",
+                "           ",
+            ]
+
+            preview.soft_wrap = True
+            await pilot.pause()
+            first_row = preview.wrapped_document.location_to_offset((3, 0)).y
+            assert preview.wrapped_document.get_offsets(3)
+            scroll_y = preview.scroll_offset.y
+            assert preview.render_line(first_row - scroll_y).text.startswith("  97 1001  ")
+            assert preview.render_line(first_row + 1 - scroll_y).text.startswith("           ")
+            assert preview.text == diff
+            preview.load_text("No text diff available.")
+            await pilot.pause()
+            assert not preview.render_line(0).text[: preview.gutter_width].strip()
 
     asyncio.run(run_app())
 
@@ -2379,14 +2439,20 @@ def test_view_settings_are_restored_after_relaunch(tmp_path: Path) -> None:
             await pilot.click("#diff-word-wrap")
             await pilot.click("#show-hidden")
             await pilot.click("#show-unapplied")
+            assert app.screen.query_one("#show-diff-line-numbers", Checkbox).value
+            await pilot.click("#show-diff-line-numbers")
             await pilot.click("#apply-view-settings")
             await pilot.pause()
+            assert app.query_one("#diff-view", TextArea).gutter_width == 0
 
         app = StgLayersApp(FixtureRepository(), config_path=config_path)
         async with app.run_test() as pilot:
             assert not app.newest_first
-            assert app.query_one("#diff-view", TextArea).soft_wrap
+            preview = app.query_one("#diff-view", TextArea)
+            assert preview.soft_wrap
+            assert not preview.show_line_numbers
             await pilot.press("v")
+            assert not app.screen.query_one("#show-diff-line-numbers", Checkbox).value
             assert app.screen.query_one("#oldest-first", RadioButton).value
             assert app.screen.query_one("#diff-word-wrap", Checkbox).value
             assert not app.screen.query_one("#show-hidden", Checkbox).value

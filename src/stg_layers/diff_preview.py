@@ -1,6 +1,11 @@
+import re
+
+from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 from textual.binding import Binding
+from textual.geometry import Offset
+from textual.strip import Strip
 from textual.widgets import TextArea
 from textual.widgets.text_area import Selection
 
@@ -19,6 +24,27 @@ _DIFF_LINE_STYLES = (
 )
 
 
+_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def _diff_line_numbers(text: str) -> dict[int, tuple[str, str]]:
+    numbers: dict[int, tuple[str, str]] = {}
+    old = new = old_end = new_end = 0
+    for row, line in enumerate(text.splitlines()):
+        if header := _HUNK_HEADER.match(line):
+            old_start, old_count, new_start, new_count = header.groups()
+            old, new = int(old_start), int(new_start)
+            old_end, new_end = old + int(old_count or 1), new + int(new_count or 1)
+        elif line.startswith((" ", "-", "+")):
+            has_old = old < old_end and not line.startswith("+")
+            has_new = new < new_end and not line.startswith("-")
+            if has_old or has_new:
+                numbers[row] = (str(old) if has_old else "", str(new) if has_new else "")
+                old += has_old
+                new += has_new
+    return numbers
+
+
 class DiffPreview(TextArea):
     BINDINGS = [
         Binding("m", "choose_move_target", "Move to…", priority=True),
@@ -32,16 +58,47 @@ class DiffPreview(TextArea):
         Binding("shift+down,shift+right", "extend_line_selection(True)", show=False, priority=True),
     ]
 
-    def __init__(self, *, id: str | None = None, soft_wrap: bool = False) -> None:
+    def __init__(
+        self, *, id: str | None = None, soft_wrap: bool = False, show_line_numbers: bool = True
+    ) -> None:
+        self._diff_numbers: dict[int, tuple[str, str]] = {}
+        self._number_width = 1
         super().__init__(
             "",
             read_only=True,
             show_cursor=True,
-            show_line_numbers=False,
+            show_line_numbers=show_line_numbers,
             soft_wrap=soft_wrap,
             compact=True,
             id=id,
         )
+
+    def load_text(self, text: str) -> None:
+        self._diff_numbers = _diff_line_numbers(text)
+        self._number_width = max(
+            (len(number) for pair in self._diff_numbers.values() for number in pair),
+            default=1,
+        )
+        super().load_text(text)
+
+    @property
+    def gutter_width(self) -> int:
+        if not self.show_line_numbers:
+            return 0
+        return max(2 * self._number_width + 3, super().gutter_width)
+
+    def _render_line(self, y: int) -> Strip:
+        # Retain TextArea's wrapped text, selection, and gutter style.
+        strip = super()._render_line(y)
+        visual_row = y + self.scroll_offset.y
+        if not self.show_line_numbers or visual_row >= self.wrapped_document.height:
+            return strip
+        row, column = self.wrapped_document.offset_to_location(Offset(0, visual_row))
+        old, new = self._diff_numbers.get(row, ("", "")) if column == 0 else ("", "")
+        width = self._number_width
+        gutter = f"{old:>{width}} {new:>{width}}  ".rjust(self.gutter_width)
+        gutter_style = next(iter(strip)).style
+        return Strip.join([Strip([Segment(gutter, gutter_style)]), strip.crop(self.gutter_width)])
 
     def get_line(self, line_index: int) -> Text:
         line = super().get_line(line_index)

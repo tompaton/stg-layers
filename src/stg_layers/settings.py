@@ -14,6 +14,7 @@ class ViewSettings:
     word_wrap: bool = False
     show_hidden: bool = True
     show_unapplied: bool = True
+    show_diff_line_numbers: bool = True
 
     @property
     def omitted_patch_statuses(self) -> tuple[PatchStatus, ...]:

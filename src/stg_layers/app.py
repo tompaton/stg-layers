@@ -271,7 +271,11 @@ class StgLayersApp(App[None]):
                 yield tree
             with Vertical(id="preview-pane"):
                 yield Static("Select a patch, file, or hunk.", id="selection-title", markup=False)
-                yield DiffPreview(id="diff-view", soft_wrap=self._view_settings.word_wrap)
+                yield DiffPreview(
+                    id="diff-view",
+                    soft_wrap=self._view_settings.word_wrap,
+                    show_line_numbers=self._view_settings.show_diff_line_numbers,
+                )
         yield Static("Loading StGit stack...", id="status", markup=False)
         yield Footer()
 
@@ -498,7 +502,9 @@ class StgLayersApp(App[None]):
             return
         previous = self._view_settings
         self._view_settings = settings
-        self.query_one("#diff-view", DiffPreview).soft_wrap = settings.word_wrap
+        preview = self.query_one("#diff-view", DiffPreview)
+        preview.soft_wrap = settings.word_wrap
+        preview.show_line_numbers = settings.show_diff_line_numbers
         if self._loaded_data is not None and (
             settings.newest_first != previous.newest_first
             or settings.omitted_patch_statuses != previous.omitted_patch_statuses
