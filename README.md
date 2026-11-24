@@ -3,6 +3,8 @@
 A Textual browser for StGit repositories, with a patch tree and a read-only diff
 preview. Stage, unstage, discard, and move files, hunks, or selected lines between layers.
 
+![StGit Layers showing the patch tree on the left and a color-highlighted diff on the right](docs/stg-layers.png)
+
 ## Requirements
 
 - Python 3.14 or newer
