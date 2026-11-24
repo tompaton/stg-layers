@@ -1,10 +1,8 @@
 from rich.style import Style
+from rich.text import Text
 from textual.binding import Binding
 from textual.widgets import TextArea
-from textual.widgets.text_area import Selection, TextAreaTheme
-from tree_sitter import Language
-from tree_sitter_diff import HIGHLIGHTS_QUERY
-from tree_sitter_diff import language as diff_language
+from textual.widgets.text_area import Selection
 
 from stg_layers.errors import RepositoryError
 from stg_layers.git import parse_diff
@@ -13,15 +11,11 @@ from stg_layers.partial_diff import HunkLineSelection
 from stg_layers.tree_view import LayerTree
 from stg_layers.tree_walker import walk_nodes
 
-_DIFF_THEME = TextAreaTheme(
-    name="stg-diff",
-    syntax_styles={
-        "diff.plus": Style(color="#98c379"),
-        "diff.minus": Style(color="#e06c75"),
-        "diff.delta": Style(color="#e5c07b", bold=True),
-        "label": Style(color="#61afef"),
-        "attribute": Style(color="#c678dd"),
-    },
+_DIFF_LINE_STYLES = (
+    (("+",), Style(color="#98c379")),
+    (("-",), Style(color="#e06c75")),
+    (("@@",), Style(color="#c678dd")),
+    (("diff --", "Binary files ", "GIT binary patch"), Style(color="#61afef")),
 )
 
 
@@ -48,12 +42,14 @@ class DiffPreview(TextArea):
             compact=True,
             id=id,
         )
-        if HIGHLIGHTS_QUERY is None:
-            raise RuntimeError("The Tree-sitter diff grammar has no highlight query.")
-        self.register_language("diff", Language(diff_language()), HIGHLIGHTS_QUERY)
-        self.register_theme(_DIFF_THEME)
-        self.language = "diff"
-        self.theme = _DIFF_THEME.name
+
+    def get_line(self, line_index: int) -> Text:
+        line = super().get_line(line_index)
+        for prefixes, style in _DIFF_LINE_STYLES:
+            if line.plain.startswith(prefixes):
+                line.stylize(style)
+                break
+        return line
 
     def _validate_selection(self, selection: Selection) -> Selection:
         selection = super()._validate_selection(selection)

@@ -1350,11 +1350,11 @@ def test_app_renders_patch_file_hunk_tree() -> None:
             assert "+after" in preview.text
             assert preview.read_only
             assert not preview.show_line_numbers
-            assert preview.language == "diff"
-            assert preview.theme == "stg-diff"
-            assert any(name == "attribute" for _, _, name in preview._highlights[0])
-            assert any(name == "diff.minus" for _, _, name in preview._highlights[1])
-            assert any(name == "diff.plus" for _, _, name in preview._highlights[2])
+            assert [str(preview.get_line(row).spans[0].style) for row in range(3)] == [
+                "#c678dd",
+                "#e06c75",
+                "#98c379",
+            ]
 
             await pilot.press("left")
             await pilot.pause()
